@@ -53,6 +53,17 @@ pub struct HostKvDeleteResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostKvNamespaceRequest {
+    pub plugin_id: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostKvNamespaceResponse {
+    pub namespaced_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct HostVfsWriteTextRequest {
     pub logical_path: String,
     pub content: String,
@@ -139,6 +150,119 @@ pub struct HostSharedRecordDeleteResponse {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationStateUpsertRequest {
+    pub plugin_id: String,
+    pub scope: String,
+    pub migration_key: String,
+    pub state_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationStateQuery {
+    pub plugin_id: String,
+    pub scope: String,
+    pub migration_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationStateResponse {
+    pub plugin_id: String,
+    pub scope: String,
+    pub migration_key: String,
+    pub state_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationStateListQuery {
+    pub plugin_id: String,
+    pub scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationStateListResponse {
+    pub states: Vec<HostMigrationStateResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationExecuteRequest {
+    pub plugin_id: String,
+    pub scope: String,
+    pub migration_key: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostMigrationExecuteResponse {
+    pub plugin_id: String,
+    pub scope: String,
+    pub migration_key: String,
+    pub status: String,
+    pub state_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostTaskUpsertRequest {
+    pub plugin_id: String,
+    pub task_key: String,
+    pub mode: String,
+    pub status: String,
+    pub cron: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostTaskResponse {
+    pub plugin_id: String,
+    pub task_key: String,
+    pub mode: String,
+    pub status: String,
+    pub cron: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostTaskListQuery {
+    pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostTaskListResponse {
+    pub tasks: Vec<HostTaskResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNavItemUpsertRequest {
+    pub plugin_id: String,
+    pub item_key: String,
+    pub label: String,
+    pub route: String,
+    pub icon: String,
+    pub visibility: String,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNavItemResponse {
+    pub plugin_id: String,
+    pub item_key: String,
+    pub label: String,
+    pub route: String,
+    pub icon: String,
+    pub visibility: String,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNavItemListQuery {
+    pub plugin_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNavItemListResponse {
+    pub items: Vec<HostNavItemResponse>,
+}
+
 fn require_user(ctx: &RequestContext) -> Result<(&str, i16, Option<&str>), AppError> {
     let user = ctx.user_info.as_ref().ok_or_else(|| {
         AppError::unauthorized(
@@ -172,6 +296,10 @@ fn validate_host_plugin_identifier(value: &str, field_name: &str, ctx: &RequestC
         ));
     }
     Ok(sanitized)
+}
+
+fn kv_namespaced_key(plugin_id: &str, key: &str) -> String {
+    format!("plugin:{}:{}", plugin_id, key)
 }
 
 async fn create_user_scoped_engine(
@@ -286,6 +414,22 @@ pub async fn set_kv(
         Arc::clone(&ctx.request_id),
         Arc::clone(&ctx.client_ip),
         serde_json::json!({ "ok": true }),
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/kv/namespace", tag = "Plugins V2")]
+pub async fn build_kv_namespace(
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostKvNamespaceRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let namespaced_key = kv_namespaced_key(&plugin_id, &payload.key);
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostKvNamespaceResponse { namespaced_key })
+            .map_err(|e| internal_error(&ctx, e.to_string()))?,
     )))
 }
 
@@ -580,12 +724,373 @@ pub async fn delete_shared_record(
     )))
 }
 
+#[utoipa::path(post, path = "/api/v1/plugin-host/db/migrations/upsert", tag = "Plugins V2")]
+pub async fn upsert_migration_state(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostMigrationStateUpsertRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
+    let migration_key = validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+    let existing = crate::entities::plugin_migration_state::Entity::find()
+        .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?;
+    let now = chrono::Utc::now();
+    let model = if let Some(existing) = existing {
+        let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
+        active.state_json = Set(payload.state_json.clone());
+        active.updated_at = Set(now.into());
+        active.update(state.db.as_ref())
+            .await
+            .map_err(|e| internal_error(&ctx, format!("failed to update migration state: {}", e)))?
+    } else {
+        crate::entities::plugin_migration_state::ActiveModel {
+            id: Set(uuid::Uuid::now_v7().to_string()),
+            plugin_id: Set(plugin_id.clone()),
+            scope: Set(scope.clone()),
+            migration_key: Set(migration_key.clone()),
+            state_json: Set(payload.state_json.clone()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        }
+        .insert(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to insert migration state: {}", e)))?
+    };
+    let response = HostMigrationStateResponse {
+        plugin_id: model.plugin_id,
+        scope: model.scope,
+        migration_key: model.migration_key,
+        state_json: model.state_json,
+    };
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(response).map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(get, path = "/api/v1/plugin-host/db/migrations/get", tag = "Plugins V2")]
+pub async fn get_migration_state(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Query(query): Query<HostMigrationStateQuery>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
+    let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
+    let migration_key = validate_host_plugin_identifier(&query.migration_key, "migration_key", &ctx)?;
+    let model = crate::entities::plugin_migration_state::Entity::find()
+        .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?
+        .ok_or_else(|| AppError::new(
+            yh_response::error::ErrorCode::NotFound,
+            "migration state not found",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        ))?;
+    let response = HostMigrationStateResponse {
+        plugin_id: model.plugin_id,
+        scope: model.scope,
+        migration_key: model.migration_key,
+        state_json: model.state_json,
+    };
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(response).map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(get, path = "/api/v1/plugin-host/db/migrations/list", tag = "Plugins V2")]
+pub async fn list_migration_states(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Query(query): Query<HostMigrationStateListQuery>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
+    let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
+    let states = crate::entities::plugin_migration_state::Entity::find()
+        .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
+        .all(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to list migration states: {}", e)))?
+        .into_iter()
+        .map(|row| HostMigrationStateResponse {
+            plugin_id: row.plugin_id,
+            scope: row.scope,
+            migration_key: row.migration_key,
+            state_json: row.state_json,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostMigrationStateListResponse { states })
+            .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/db/migrations/execute", tag = "Plugins V2")]
+pub async fn execute_migration(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostMigrationExecuteRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
+    let migration_key = validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+    let state_json = serde_json::json!({
+        "status": "applied",
+        "description": payload.description,
+        "applied_at": chrono::Utc::now().to_rfc3339(),
+    })
+    .to_string();
+    let model = crate::entities::plugin_migration_state::ActiveModel {
+        id: Set(uuid::Uuid::now_v7().to_string()),
+        plugin_id: Set(plugin_id.clone()),
+        scope: Set(scope.clone()),
+        migration_key: Set(migration_key.clone()),
+        state_json: Set(state_json.clone()),
+        created_at: Set(chrono::Utc::now().into()),
+        updated_at: Set(chrono::Utc::now().into()),
+    };
+    let existing = crate::entities::plugin_migration_state::Entity::find()
+        .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
+        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?;
+    let stored = if let Some(existing) = existing {
+        let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
+        active.state_json = Set(state_json.clone());
+        active.updated_at = Set(chrono::Utc::now().into());
+        active.update(state.db.as_ref())
+            .await
+            .map_err(|e| internal_error(&ctx, format!("failed to update migration state: {}", e)))?
+    } else {
+        model.insert(state.db.as_ref())
+            .await
+            .map_err(|e| internal_error(&ctx, format!("failed to insert migration state: {}", e)))?
+    };
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostMigrationExecuteResponse {
+            plugin_id: stored.plugin_id,
+            scope: stored.scope,
+            migration_key: stored.migration_key,
+            status: "applied".to_string(),
+            state_json: stored.state_json,
+        })
+        .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/tasks/upsert", tag = "Plugins V2")]
+pub async fn upsert_task(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostTaskUpsertRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let task_key = validate_host_plugin_identifier(&payload.task_key, "task_key", &ctx)?;
+    let existing = crate::entities::plugin_task::Entity::find()
+        .filter(crate::entities::plugin_task::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_task::Column::TaskKey.eq(task_key.as_str()))
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to query plugin task: {}", e)))?;
+    let now = chrono::Utc::now();
+    let model = if let Some(existing) = existing {
+        let mut active: crate::entities::plugin_task::ActiveModel = existing.into();
+        active.mode = Set(payload.mode.clone());
+        active.status = Set(payload.status.clone());
+        active.cron = Set(payload.cron.clone());
+        active.last_error = Set(payload.last_error.clone());
+        active.updated_at = Set(now.into());
+        active.update(state.db.as_ref())
+            .await
+            .map_err(|e| internal_error(&ctx, format!("failed to update plugin task: {}", e)))?
+    } else {
+        crate::entities::plugin_task::ActiveModel {
+            id: Set(uuid::Uuid::now_v7().to_string()),
+            plugin_id: Set(plugin_id.clone()),
+            task_key: Set(task_key.clone()),
+            mode: Set(payload.mode.clone()),
+            status: Set(payload.status.clone()),
+            cron: Set(payload.cron.clone()),
+            last_error: Set(payload.last_error.clone()),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        }
+        .insert(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to insert plugin task: {}", e)))?
+    };
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostTaskResponse {
+            plugin_id: model.plugin_id,
+            task_key: model.task_key,
+            mode: model.mode,
+            status: model.status,
+            cron: model.cron,
+            last_error: model.last_error,
+        })
+        .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(get, path = "/api/v1/plugin-host/tasks/list", tag = "Plugins V2")]
+pub async fn list_tasks(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Query(query): Query<HostTaskListQuery>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
+    let tasks = crate::entities::plugin_task::Entity::find()
+        .filter(crate::entities::plugin_task::Column::PluginId.eq(plugin_id.as_str()))
+        .all(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to list plugin tasks: {}", e)))?
+        .into_iter()
+        .map(|row| HostTaskResponse {
+            plugin_id: row.plugin_id,
+            task_key: row.task_key,
+            mode: row.mode,
+            status: row.status,
+            cron: row.cron,
+            last_error: row.last_error,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostTaskListResponse { tasks })
+            .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/nav/upsert", tag = "Plugins V2")]
+pub async fn upsert_nav_item(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostNavItemUpsertRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let item_key = validate_host_plugin_identifier(&payload.item_key, "item_key", &ctx)?;
+    let existing = crate::entities::plugin_nav_item::Entity::find()
+        .filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()))
+        .filter(crate::entities::plugin_nav_item::Column::ItemKey.eq(item_key.as_str()))
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to query nav item: {}", e)))?;
+    let now = chrono::Utc::now();
+    let model = if let Some(existing) = existing {
+        let mut active: crate::entities::plugin_nav_item::ActiveModel = existing.into();
+        active.label = Set(payload.label.clone());
+        active.route = Set(payload.route.clone());
+        active.icon = Set(payload.icon.clone());
+        active.visibility = Set(payload.visibility.clone());
+        active.sort_order = Set(payload.sort_order);
+        active.updated_at = Set(now.into());
+        active.update(state.db.as_ref())
+            .await
+            .map_err(|e| internal_error(&ctx, format!("failed to update nav item: {}", e)))?
+    } else {
+        crate::entities::plugin_nav_item::ActiveModel {
+            id: Set(uuid::Uuid::now_v7().to_string()),
+            plugin_id: Set(plugin_id.clone()),
+            item_key: Set(item_key.clone()),
+            label: Set(payload.label.clone()),
+            route: Set(payload.route.clone()),
+            icon: Set(payload.icon.clone()),
+            visibility: Set(payload.visibility.clone()),
+            sort_order: Set(payload.sort_order),
+            created_at: Set(now.into()),
+            updated_at: Set(now.into()),
+        }
+        .insert(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to insert nav item: {}", e)))?
+    };
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostNavItemResponse {
+            plugin_id: model.plugin_id,
+            item_key: model.item_key,
+            label: model.label,
+            route: model.route,
+            icon: model.icon,
+            visibility: model.visibility,
+            sort_order: model.sort_order,
+        })
+        .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(get, path = "/api/v1/plugin-host/nav/list", tag = "Plugins V2")]
+pub async fn list_nav_items(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Query(query): Query<HostNavItemListQuery>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let mut select = crate::entities::plugin_nav_item::Entity::find();
+    if let Some(plugin_id) = query.plugin_id.as_deref() {
+        let plugin_id = validate_host_plugin_identifier(plugin_id, "plugin_id", &ctx)?;
+        select = select.filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()));
+    }
+    let items = select
+        .all(state.db.as_ref())
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to list nav items: {}", e)))?
+        .into_iter()
+        .map(|row| HostNavItemResponse {
+            plugin_id: row.plugin_id,
+            item_key: row.item_key,
+            label: row.label,
+            route: row.route,
+            icon: row.icon,
+            visibility: row.visibility,
+            sort_order: row.sort_order,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostNavItemListResponse { items })
+            .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
 pub fn create_host_api_router(db: Arc<DatabaseConnection>) -> Router {
     Router::new()
         .route("/identity", get(get_identity))
         .route("/users/{user_id}", get(get_user_by_id))
         .route("/auth/has-permission", post(check_permission))
         .route("/kv/set", post(set_kv))
+        .route("/kv/namespace", post(build_kv_namespace))
         .route("/kv/{key}", get(get_kv))
         .route("/kv/{key}", delete(delete_kv))
         .route("/vfs/read-text", get(read_vfs_text))
@@ -596,5 +1101,13 @@ pub fn create_host_api_router(db: Arc<DatabaseConnection>) -> Router {
         .route("/db/shared/get", get(get_shared_record))
         .route("/db/shared/list", get(list_shared_records))
         .route("/db/shared/delete", delete(delete_shared_record))
+        .route("/db/migrations/upsert", post(upsert_migration_state))
+        .route("/db/migrations/get", get(get_migration_state))
+        .route("/db/migrations/list", get(list_migration_states))
+        .route("/db/migrations/execute", post(execute_migration))
+        .route("/tasks/upsert", post(upsert_task))
+        .route("/tasks/list", get(list_tasks))
+        .route("/nav/upsert", post(upsert_nav_item))
+        .route("/nav/list", get(list_nav_items))
         .with_state(HostApiState { db })
 }

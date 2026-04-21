@@ -13,6 +13,8 @@ pub fn create_router(db: Arc<DatabaseConnection>) -> Router {
         .route("/install", axum::routing::post(handlers::install_plugin_zip))
         .route("/{plugin_id}/permissions", get(handlers::list_permission_grants))
         .route("/{plugin_id}/permissions", axum::routing::post(handlers::update_permission_grants))
+        .route("/{plugin_id}/tasks", get(handlers::list_plugin_tasks))
+        .route("/{plugin_id}/nav-items", get(handlers::list_plugin_nav_items))
         .route("/{plugin_id}/runtime", get(handlers::get_plugin_runtime_handle))
         .route("/{plugin_id}/start", axum::routing::post(handlers::start_plugin_runtime))
         .route("/{plugin_id}/stop", axum::routing::post(handlers::stop_plugin_runtime))

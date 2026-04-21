@@ -40,6 +40,16 @@ pub struct PluginRuntimeListResponse {
     pub runtimes: Vec<RuntimeHandle>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct PluginTaskListResponse {
+    pub tasks: Vec<crate::entities::plugin_task::Model>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct PluginNavItemListResponse {
+    pub items: Vec<crate::entities::plugin_nav_item::Model>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct MarketInstallFromUrlRequest {
     pub download_url: String,
@@ -302,6 +312,60 @@ pub async fn update_permission_grants(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/admin/plugins/{plugin_id}/tasks",
+    params(("plugin_id" = String, Path, description = "Plugin ID")),
+    responses((status = 200, description = "List plugin task governance records", body = PluginTaskListResponse)),
+    security(("jwt" = [])),
+    tag = "Plugins V2"
+)]
+pub async fn list_plugin_tasks(
+    State(state): State<PluginAdminState>,
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+) -> Result<impl IntoResponse, AppError> {
+    let tasks = registry::list_plugin_tasks(state.db.as_ref(), &plugin_id)
+        .await
+        .map_err(|e| map_db_error(&ctx, "Failed to list plugin tasks", e))?;
+    let data = serde_json::to_value(PluginTaskListResponse { tasks }).map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/plugins/{plugin_id}/nav-items",
+    params(("plugin_id" = String, Path, description = "Plugin ID")),
+    responses((status = 200, description = "List plugin navigation items", body = PluginNavItemListResponse)),
+    security(("jwt" = [])),
+    tag = "Plugins V2"
+)]
+pub async fn list_plugin_nav_items(
+    State(state): State<PluginAdminState>,
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+) -> Result<impl IntoResponse, AppError> {
+    let items = registry::list_plugin_nav_items(state.db.as_ref(), &plugin_id)
+        .await
+        .map_err(|e| map_db_error(&ctx, "Failed to list plugin nav items", e))?;
+    let data = serde_json::to_value(PluginNavItemListResponse { items }).map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/admin/plugins/{plugin_id}/start",
     params(("plugin_id" = String, Path, description = "Plugin ID")),
@@ -387,34 +451,26 @@ pub async fn start_plugin_runtime(
             .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
         }
         crate::manifest::PluginRuntimeManifest::WasmComponent(runtime_manifest) => {
-            let _ = crate::runtime::wasm::prepare_wasm_runtime(
+            crate::runtime::wasm::start_wasm_component_runtime(
                 &plugin_id,
                 &install_root,
                 runtime_manifest,
-                "wasm-component",
+                &manager.status_snapshot().host_api_base_url,
+                &manager.host_api_secret_base64(),
             )
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
-            return Err(AppError::new(
-                ErrorCode::BadRequest,
-                "wasm runtime executor is not implemented yet; installation and validation are available, but start is not supported yet",
-                ctx.request_id.to_owned(),
-                ctx.client_ip.to_owned(),
-            ));
+            .await
+            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
         }
         crate::manifest::PluginRuntimeManifest::WasmModule(runtime_manifest) => {
-            let _ = crate::runtime::wasm::prepare_wasm_runtime(
+            crate::runtime::wasm::start_wasm_module_runtime(
                 &plugin_id,
                 &install_root,
                 runtime_manifest,
-                "wasm-module",
+                &manager.status_snapshot().host_api_base_url,
+                &manager.host_api_secret_base64(),
             )
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
-            return Err(AppError::new(
-                ErrorCode::BadRequest,
-                "wasm runtime executor is not implemented yet; installation and validation are available, but start is not supported yet",
-                ctx.request_id.to_owned(),
-                ctx.client_ip.to_owned(),
-            ));
+            .await
+            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
         }
     };
     manager.set_runtime_handle(&plugin_id, handle.clone());
@@ -542,6 +598,9 @@ pub async fn stop_plugin_runtime(
         "docker" => crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
             .await
             .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+        "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
+            .await
+            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
         _ => {}
     }
     let _ = registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, "installed").await;
@@ -585,6 +644,9 @@ pub async fn uninstall_plugin(
                 .await
                 .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
             "docker" => crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
+                .await
+                .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+            "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
                 .await
                 .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
             _ => {}

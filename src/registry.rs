@@ -1,4 +1,4 @@
-use crate::entities::{plugin_audit_log, plugin_registry, plugin_version};
+use crate::entities::{plugin_audit_log, plugin_nav_item, plugin_registry, plugin_task, plugin_version};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set,
@@ -139,4 +139,26 @@ pub async fn append_audit_log(
     }
     .insert(db)
     .await
+}
+
+pub async fn list_plugin_tasks(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+) -> Result<Vec<plugin_task::Model>, sea_orm::DbErr> {
+    plugin_task::Entity::find()
+        .filter(plugin_task::Column::PluginId.eq(plugin_id))
+        .order_by_asc(plugin_task::Column::TaskKey)
+        .all(db)
+        .await
+}
+
+pub async fn list_plugin_nav_items(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+) -> Result<Vec<plugin_nav_item::Model>, sea_orm::DbErr> {
+    plugin_nav_item::Entity::find()
+        .filter(plugin_nav_item::Column::PluginId.eq(plugin_id))
+        .order_by_asc(plugin_nav_item::Column::SortOrder)
+        .all(db)
+        .await
 }

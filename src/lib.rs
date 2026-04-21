@@ -62,5 +62,26 @@ pub async fn init_db(db: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
     );
     db.execute(stmt).await?;
 
+    let stmt = builder.build(
+        schema
+            .create_table_from_entity(entities::plugin_migration_state::Entity)
+            .if_not_exists(),
+    );
+    db.execute(stmt).await?;
+
+    let stmt = builder.build(
+        schema
+            .create_table_from_entity(entities::plugin_task::Entity)
+            .if_not_exists(),
+    );
+    db.execute(stmt).await?;
+
+    let stmt = builder.build(
+        schema
+            .create_table_from_entity(entities::plugin_nav_item::Entity)
+            .if_not_exists(),
+    );
+    db.execute(stmt).await?;
+
     Ok(())
 }

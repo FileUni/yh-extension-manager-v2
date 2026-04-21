@@ -3,12 +3,14 @@ use crate::manager::get_plugin_runtime_manager;
 use crate::registry;
 use axum::{
     body::{to_bytes, Body},
-    extract::{Path, Request},
+    extract::{OriginalUri, Path, Request, ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade}},
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use futures_util::{SinkExt, StreamExt};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
+use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
 use url::Url;
 use yh_config_infra::RequestContext;
 use yh_response::{AppError, error::ErrorCode};
@@ -193,17 +195,126 @@ pub async fn proxy_plugin_api(
     Ok(resp)
 }
 
-pub async fn proxy_plugin_ws(
+pub async fn proxy_plugin_ws_root(
     Path(plugin_id): Path<String>,
+    ws: WebSocketUpgrade,
+    OriginalUri(uri): OriginalUri,
     axum::Extension(ctx): axum::Extension<RequestContext>,
 ) -> Result<Response, AppError> {
-    let _ = plugin_id;
-    Err(AppError::new(
-        ErrorCode::BadRequest,
-        "plugin websocket proxy is not implemented yet in v2",
-        ctx.request_id.to_owned(),
-        ctx.client_ip.to_owned(),
-    ))
+    proxy_plugin_ws_inner(plugin_id, String::new(), ws, uri, ctx).await
+}
+
+pub async fn proxy_plugin_ws(
+    Path((plugin_id, path)): Path<(String, String)>,
+    ws: WebSocketUpgrade,
+    OriginalUri(uri): OriginalUri,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+) -> Result<Response, AppError> {
+    proxy_plugin_ws_inner(plugin_id, path, ws, uri, ctx).await
+}
+
+async fn proxy_plugin_ws_inner(
+    plugin_id: String,
+    path: String,
+    ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
+    ctx: RequestContext,
+) -> Result<Response, AppError> {
+    let base_url = active_route_base_url(&plugin_id, &ctx).await?;
+    let protocol = if base_url.starts_with("https://") || base_url.starts_with("wss://") {
+        "wss://"
+    } else {
+        "ws://"
+    };
+    let authority = base_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://")
+        .trim_end_matches('/');
+    let query = uri.query().unwrap_or("");
+    let target = if query.is_empty() {
+        format!("{}{}/{}", protocol, authority, path)
+    } else {
+        format!("{}{}/{}?{}", protocol, authority, path, query)
+    };
+    let target_url = Url::parse(&target).map_err(|e| {
+        AppError::new(
+            ErrorCode::BadRequest,
+            format!("invalid plugin websocket target: {}", e),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    Ok(ws
+        .on_upgrade(move |client_socket| async move {
+            if let Err(e) = forward_websocket(client_socket, target_url).await {
+                yh_console_log::yhlog("warn", &format!("plugin websocket proxy failed: {}", e));
+            }
+        })
+        .into_response())
+}
+
+async fn forward_websocket(client_socket: WebSocket, target: Url) -> Result<(), String> {
+    let (server_socket, _) = connect_async(target.as_str())
+        .await
+        .map_err(|e| format!("failed to connect upstream websocket: {}", e))?;
+    let (mut client_sink, mut client_stream) = client_socket.split();
+    let (mut server_sink, mut server_stream) = server_socket.split();
+
+    let client_to_server = async {
+        while let Some(Ok(msg)) = client_stream.next().await {
+            let upstream = match msg {
+                AxumWsMessage::Text(text) => TungsteniteMessage::Text(text.to_string().into()),
+                AxumWsMessage::Binary(bin) => TungsteniteMessage::Binary(bin),
+                AxumWsMessage::Ping(v) => TungsteniteMessage::Ping(v),
+                AxumWsMessage::Pong(v) => TungsteniteMessage::Pong(v),
+                AxumWsMessage::Close(frame) => {
+                    let _ = server_sink.send(TungsteniteMessage::Close(frame.map(|f| {
+                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                            code: f.code.into(),
+                            reason: f.reason.as_str().into(),
+                        }
+                    }))).await;
+                    break;
+                }
+            };
+            if server_sink.send(upstream).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    let server_to_client = async {
+        while let Some(Ok(msg)) = server_stream.next().await {
+            let downstream = match msg {
+                TungsteniteMessage::Text(text) => AxumWsMessage::Text(text.to_string().into()),
+                TungsteniteMessage::Binary(bin) => AxumWsMessage::Binary(bin),
+                TungsteniteMessage::Ping(v) => AxumWsMessage::Ping(v),
+                TungsteniteMessage::Pong(v) => AxumWsMessage::Pong(v),
+                TungsteniteMessage::Close(frame) => {
+                    let _ = client_sink.send(AxumWsMessage::Close(frame.map(|f| {
+                        axum::extract::ws::CloseFrame {
+                            code: f.code.into(),
+                            reason: f.reason.as_str().into(),
+                        }
+                    }))).await;
+                    break;
+                }
+                TungsteniteMessage::Frame(_) => continue,
+            };
+            if client_sink.send(downstream).await.is_err() {
+                break;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = client_to_server => {},
+        _ = server_to_client => {},
+    }
+
+    Ok(())
 }
 
 pub fn create_public_router(_db: Arc<sea_orm::DatabaseConnection>) -> axum::Router {
@@ -211,6 +322,6 @@ pub fn create_public_router(_db: Arc<sea_orm::DatabaseConnection>) -> axum::Rout
         .route("/{plugin_id}/ui", axum::routing::get(serve_plugin_ui_root))
         .route("/{plugin_id}/ui/{*path}", axum::routing::get(serve_plugin_ui))
         .route("/{plugin_id}/api/{*path}", axum::routing::any(proxy_plugin_api))
-        .route("/{plugin_id}/ws", axum::routing::get(proxy_plugin_ws))
-        .route("/{plugin_id}/ws/{*path}", axum::routing::any(proxy_plugin_ws))
+        .route("/{plugin_id}/ws", axum::routing::get(proxy_plugin_ws_root))
+        .route("/{plugin_id}/ws/{*path}", axum::routing::get(proxy_plugin_ws))
 }
