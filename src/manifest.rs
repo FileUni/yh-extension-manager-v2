@@ -197,7 +197,9 @@ impl PluginManifest {
                     .map(|v| v.trim().is_empty())
                     .unwrap_or(true);
                 if image_empty && archive_empty && compose_empty {
-                    return Err("docker runtime requires image, oci_archive, or compose_file".to_string());
+                    return Err(
+                        "docker runtime requires image, oci_archive, or compose_file".to_string(),
+                    );
                 }
             }
         }

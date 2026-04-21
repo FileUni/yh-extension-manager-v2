@@ -11,7 +11,10 @@ pub fn prepare_wasm_runtime(
 ) -> Result<RuntimeHandle, String> {
     let artifact = install_root.join(&runtime.artifact);
     if !artifact.exists() {
-        return Err(format!("wasm runtime artifact not found: {}", artifact.display()));
+        return Err(format!(
+            "wasm runtime artifact not found: {}",
+            artifact.display()
+        ));
     }
     Ok(RuntimeHandle {
         plugin_id: plugin_id.to_string(),
@@ -30,10 +33,15 @@ pub async fn start_wasm_module_runtime(
     runtime: &WasmRuntimeManifest,
     host_api_base_url: &str,
     host_api_token: &str,
+    plugin_config_dir: &str,
+    plugin_config_file: &str,
 ) -> Result<RuntimeHandle, String> {
     let artifact = install_root.join(&runtime.artifact);
     if !artifact.exists() {
-        return Err(format!("wasm module artifact not found: {}", artifact.display()));
+        return Err(format!(
+            "wasm module artifact not found: {}",
+            artifact.display()
+        ));
     }
 
     let runner = std::env::var("FILEUNI_WASM_RUNNER").unwrap_or_else(|_| "wasmtime".to_string());
@@ -48,6 +56,8 @@ pub async fn start_wasm_module_runtime(
     command.env("FILEUNI_PLUGIN_ID", plugin_id);
     command.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", host_api_base_url);
     command.env("FILEUNI_PLUGIN_HOST_API_TOKEN", host_api_token);
+    command.env("FILEUNI_PLUGIN_CONFIG_DIR", plugin_config_dir);
+    command.env("FILEUNI_PLUGIN_CONFIG_FILE", plugin_config_file);
     let child = command
         .spawn()
         .map_err(|e| format!("failed to spawn wasm module runner '{}': {}", runner, e))?;
@@ -71,14 +81,20 @@ pub async fn start_wasm_component_runtime(
     runtime: &WasmRuntimeManifest,
     host_api_base_url: &str,
     host_api_token: &str,
+    plugin_config_dir: &str,
+    plugin_config_file: &str,
 ) -> Result<RuntimeHandle, String> {
     let artifact = install_root.join(&runtime.artifact);
     if !artifact.exists() {
-        return Err(format!("wasm component artifact not found: {}", artifact.display()));
+        return Err(format!(
+            "wasm component artifact not found: {}",
+            artifact.display()
+        ));
     }
 
-    let runner = std::env::var("FILEUNI_WASM_COMPONENT_RUNNER")
-        .unwrap_or_else(|_| std::env::var("FILEUNI_WASM_RUNNER").unwrap_or_else(|_| "wasmtime".to_string()));
+    let runner = std::env::var("FILEUNI_WASM_COMPONENT_RUNNER").unwrap_or_else(|_| {
+        std::env::var("FILEUNI_WASM_RUNNER").unwrap_or_else(|_| "wasmtime".to_string())
+    });
     let mut command = Command::new(&runner);
     command.arg("run").arg(&artifact);
     if let Some(args) = &runtime.args {
@@ -90,6 +106,8 @@ pub async fn start_wasm_component_runtime(
     command.env("FILEUNI_PLUGIN_ID", plugin_id);
     command.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", host_api_base_url);
     command.env("FILEUNI_PLUGIN_HOST_API_TOKEN", host_api_token);
+    command.env("FILEUNI_PLUGIN_CONFIG_DIR", plugin_config_dir);
+    command.env("FILEUNI_PLUGIN_CONFIG_FILE", plugin_config_file);
     let child = command
         .spawn()
         .map_err(|e| format!("failed to spawn wasm component runner '{}': {}", runner, e))?;

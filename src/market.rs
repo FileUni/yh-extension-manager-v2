@@ -40,7 +40,10 @@ pub async fn fetch_catalog() -> Result<serde_json::Value, String> {
         .map_err(|e| format!("failed to fetch plugin market catalog: {}", e))?;
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("plugin market catalog request failed with status {}", status));
+        return Err(format!(
+            "plugin market catalog request failed with status {}",
+            status
+        ));
     }
     response
         .json::<serde_json::Value>()

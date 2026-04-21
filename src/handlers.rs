@@ -1,18 +1,24 @@
 use crate::installer::{self, InstallPluginOptions};
-use crate::manager::{PluginRuntimeStatusSnapshot, get_plugin_runtime_manager, get_runtime_status_snapshot};
+use crate::manager::{
+    PluginRuntimeStatusSnapshot, get_plugin_runtime_manager, get_runtime_status_snapshot,
+};
 use crate::market;
 use crate::permissions::{self, PluginPermissionGrantItem};
 use crate::registry::{self, RegistryStats};
 use crate::runtime::RuntimeHandle;
-use axum::{Json, extract::{Path, Request, State}, response::IntoResponse};
+use axum::{
+    Json,
+    extract::{Path, Request, State},
+    response::IntoResponse,
+};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use yh_config_infra::RequestContext;
-use yh_system::config::get_system_config;
 use yh_response::{AppError, Resp, error::ErrorCode};
+use yh_system::config::get_system_config;
 
 #[derive(Clone)]
 pub struct PluginAdminState {
@@ -58,7 +64,13 @@ pub struct MarketInstallFromUrlRequest {
 fn sanitize_fs_component(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -404,17 +416,18 @@ pub async fn start_plugin_runtime(
             ctx.client_ip.to_owned(),
         )
     })?;
-    let version = registry::get_version_by_plugin_and_version(state.db.as_ref(), &plugin_id, version)
-        .await
-        .map_err(|e| map_db_error(&ctx, "Failed to load plugin version", e))?
-        .ok_or_else(|| {
-            AppError::new(
-                ErrorCode::NotFound,
-                format!("Plugin '{}' current version record not found", plugin_id),
-                ctx.request_id.to_owned(),
-                ctx.client_ip.to_owned(),
-            )
-        })?;
+    let version =
+        registry::get_version_by_plugin_and_version(state.db.as_ref(), &plugin_id, version)
+            .await
+            .map_err(|e| map_db_error(&ctx, "Failed to load plugin version", e))?
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::NotFound,
+                    format!("Plugin '{}' current version record not found", plugin_id),
+                    ctx.request_id.to_owned(),
+                    ctx.client_ip.to_owned(),
+                )
+            })?;
     let install_root = PathBuf::from(&version.package_path);
     let manifest = installer::read_manifest_from_package_dir(&install_root)
         .await
@@ -426,6 +439,10 @@ pub async fn start_plugin_runtime(
                 ctx.client_ip.to_owned(),
             )
         })?;
+    let (plugin_config_dir, plugin_config_file) = manager
+        .ensure_plugin_config_paths(&plugin_id)
+        .await
+        .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
     let handle = match &manifest.runtime {
         crate::manifest::PluginRuntimeManifest::Process(runtime_manifest) => {
             crate::runtime::process::start_process_runtime(
@@ -434,9 +451,13 @@ pub async fn start_plugin_runtime(
                 runtime_manifest,
                 &manager.status_snapshot().host_api_base_url,
                 &manager.host_api_secret_base64(),
+                &plugin_config_dir,
+                &plugin_config_file,
             )
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?
         }
         crate::manifest::PluginRuntimeManifest::Docker(runtime_manifest) => {
             crate::runtime::docker::start_docker_runtime(
@@ -446,9 +467,13 @@ pub async fn start_plugin_runtime(
                 manager.docker_engine_command(),
                 &manager.status_snapshot().host_api_base_url,
                 &manager.host_api_secret_base64(),
+                &plugin_config_dir,
+                &plugin_config_file,
             )
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?
         }
         crate::manifest::PluginRuntimeManifest::WasmComponent(runtime_manifest) => {
             crate::runtime::wasm::start_wasm_component_runtime(
@@ -457,9 +482,13 @@ pub async fn start_plugin_runtime(
                 runtime_manifest,
                 &manager.status_snapshot().host_api_base_url,
                 &manager.host_api_secret_base64(),
+                &plugin_config_dir,
+                &plugin_config_file,
             )
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?
         }
         crate::manifest::PluginRuntimeManifest::WasmModule(runtime_manifest) => {
             crate::runtime::wasm::start_wasm_module_runtime(
@@ -468,13 +497,18 @@ pub async fn start_plugin_runtime(
                 runtime_manifest,
                 &manager.status_snapshot().host_api_base_url,
                 &manager.host_api_secret_base64(),
+                &plugin_config_dir,
+                &plugin_config_file,
             )
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?
         }
     };
     manager.set_runtime_handle(&plugin_id, handle.clone());
-    let _ = registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, "running").await;
+    let _ =
+        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, "running").await;
     let _ = registry::append_audit_log(
         state.db.as_ref(),
         &plugin_id,
@@ -594,16 +628,26 @@ pub async fn stop_plugin_runtime(
     match handle.runtime_kind.as_str() {
         "process" => crate::runtime::process::stop_process_runtime(&handle)
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
-        "docker" => crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
-            .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?,
+        "docker" => {
+            crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
+                .await
+                .map_err(|e| {
+                    AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+                })?
+        }
         "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
             .await
-            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?,
         _ => {}
     }
-    let _ = registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, "installed").await;
+    let _ =
+        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, "installed")
+            .await;
     let _ = registry::append_audit_log(
         state.db.as_ref(),
         &plugin_id,
@@ -642,13 +686,22 @@ pub async fn uninstall_plugin(
         match handle.runtime_kind.as_str() {
             "process" => crate::runtime::process::stop_process_runtime(&handle)
                 .await
-                .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
-            "docker" => crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
-                .await
-                .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+                .map_err(|e| {
+                    AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+                })?,
+            "docker" => crate::runtime::docker::stop_docker_runtime(
+                &handle,
+                manager.docker_engine_command(),
+            )
+            .await
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?,
             "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
                 .await
-                .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?,
+                .map_err(|e| {
+                    AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+                })?,
             _ => {}
         }
     }
@@ -656,7 +709,10 @@ pub async fn uninstall_plugin(
     if let Some(system_cfg) = get_system_config() {
         let temp_dir = system_cfg.read().await.system.get_temp_dir().to_string();
         let plugin_component = sanitize_fs_component(&plugin_id);
-        let sqlite_root = PathBuf::from(temp_dir).join("extension").join("sqlite").join(&plugin_component);
+        let sqlite_root = PathBuf::from(temp_dir)
+            .join("extension")
+            .join("sqlite")
+            .join(&plugin_component);
         if tokio::fs::try_exists(&sqlite_root).await.unwrap_or(false) {
             let _ = tokio::fs::remove_dir_all(&sqlite_root).await;
         }
@@ -675,13 +731,10 @@ pub async fn uninstall_plugin(
         })?;
 
     if let Some(version) = plugin.current_version.as_ref()
-        && let Some(version_row) = registry::get_version_by_plugin_and_version(
-            state.db.as_ref(),
-            &plugin_id,
-            version,
-        )
-        .await
-        .map_err(|e| map_db_error(&ctx, "Failed to load plugin version", e))?
+        && let Some(version_row) =
+            registry::get_version_by_plugin_and_version(state.db.as_ref(), &plugin_id, version)
+                .await
+                .map_err(|e| map_db_error(&ctx, "Failed to load plugin version", e))?
     {
         let package_dir = PathBuf::from(version_row.package_path.clone());
         if tokio::fs::try_exists(&package_dir).await.unwrap_or(false) {
@@ -775,11 +828,13 @@ pub async fn install_from_market_url(
         },
     )
     .await
-    .map_err(|e| AppError::new(
-        ErrorCode::BadRequest,
-        e,
-        ctx.request_id.to_owned(),
-        ctx.client_ip.to_owned(),
-    ))?;
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::BadRequest,
+            e,
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
     Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, result)))
 }

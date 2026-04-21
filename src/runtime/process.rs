@@ -10,7 +10,10 @@ pub fn prepare_process_runtime(
 ) -> Result<RuntimeHandle, String> {
     let program = install_root.join(&runtime.program);
     if !program.exists() {
-        return Err(format!("process runtime program not found: {}", program.display()));
+        return Err(format!(
+            "process runtime program not found: {}",
+            program.display()
+        ));
     }
     Ok(RuntimeHandle {
         plugin_id: plugin_id.to_string(),
@@ -29,6 +32,8 @@ pub async fn start_process_runtime(
     runtime: &ProcessRuntimeManifest,
     host_api_base_url: &str,
     host_api_token: &str,
+    plugin_config_dir: &str,
+    plugin_config_file: &str,
 ) -> Result<RuntimeHandle, String> {
     let program = install_root.join(&runtime.program);
     let mut command = Command::new(&program);
@@ -46,9 +51,15 @@ pub async fn start_process_runtime(
     command.env("FILEUNI_PLUGIN_ID", plugin_id);
     command.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", host_api_base_url);
     command.env("FILEUNI_PLUGIN_HOST_API_TOKEN", host_api_token);
-    let child = command
-        .spawn()
-        .map_err(|e| format!("failed to spawn process runtime '{}': {}", program.display(), e))?;
+    command.env("FILEUNI_PLUGIN_CONFIG_DIR", plugin_config_dir);
+    command.env("FILEUNI_PLUGIN_CONFIG_FILE", plugin_config_file);
+    let child = command.spawn().map_err(|e| {
+        format!(
+            "failed to spawn process runtime '{}': {}",
+            program.display(),
+            e
+        )
+    })?;
     let pid = child.id();
     drop(child);
     Ok(RuntimeHandle {

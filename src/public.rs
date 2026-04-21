@@ -2,8 +2,11 @@ use crate::installer;
 use crate::manager::get_plugin_runtime_manager;
 use crate::registry;
 use axum::{
-    body::{to_bytes, Body},
-    extract::{OriginalUri, Path, Request, ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade}},
+    body::{Body, to_bytes},
+    extract::{
+        OriginalUri, Path, Request,
+        ws::{Message as AxumWsMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -16,7 +19,11 @@ use yh_config_infra::RequestContext;
 use yh_response::{AppError, error::ErrorCode};
 
 fn internal_error(ctx: &RequestContext, message: impl Into<String>) -> AppError {
-    AppError::internal(message, Arc::clone(&ctx.request_id), Arc::clone(&ctx.client_ip))
+    AppError::internal(
+        message,
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+    )
 }
 
 fn blank_error(code: ErrorCode, message: impl Into<String>) -> AppError {
@@ -25,7 +32,11 @@ fn blank_error(code: ErrorCode, message: impl Into<String>) -> AppError {
 
 fn safe_join(base: &StdPath, name: &str) -> Result<PathBuf, AppError> {
     let path = StdPath::new(name);
-    if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(blank_error(
             ErrorCode::BadRequest,
             format!("invalid relative path: {}", name),
@@ -40,16 +51,38 @@ async fn load_package_root(
 ) -> Result<(PathBuf, crate::manifest::PluginManifest), AppError> {
     let plugin = registry::get_registry_by_id(db.as_ref(), plugin_id)
         .await
-        .map_err(|e| blank_error(ErrorCode::InternalError, format!("failed to load plugin registry: {}", e)))?
-        .ok_or_else(|| blank_error(ErrorCode::NotFound, format!("Plugin '{}' not found", plugin_id)))?;
-    let version = plugin
-        .current_version
-        .as_ref()
-        .ok_or_else(|| blank_error(ErrorCode::BadRequest, format!("Plugin '{}' has no installed version", plugin_id)))?;
+        .map_err(|e| {
+            blank_error(
+                ErrorCode::InternalError,
+                format!("failed to load plugin registry: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            blank_error(
+                ErrorCode::NotFound,
+                format!("Plugin '{}' not found", plugin_id),
+            )
+        })?;
+    let version = plugin.current_version.as_ref().ok_or_else(|| {
+        blank_error(
+            ErrorCode::BadRequest,
+            format!("Plugin '{}' has no installed version", plugin_id),
+        )
+    })?;
     let version = registry::get_version_by_plugin_and_version(db.as_ref(), plugin_id, version)
         .await
-        .map_err(|e| blank_error(ErrorCode::InternalError, format!("failed to load plugin version: {}", e)))?
-        .ok_or_else(|| blank_error(ErrorCode::NotFound, format!("Plugin '{}' current version record not found", plugin_id)))?;
+        .map_err(|e| {
+            blank_error(
+                ErrorCode::InternalError,
+                format!("failed to load plugin version: {}", e),
+            )
+        })?
+        .ok_or_else(|| {
+            blank_error(
+                ErrorCode::NotFound,
+                format!("Plugin '{}' current version record not found", plugin_id),
+            )
+        })?;
     let install_root = PathBuf::from(version.package_path);
     let manifest = installer::read_manifest_from_package_dir(&install_root)
         .await
@@ -132,7 +165,9 @@ async fn serve_plugin_ui_file(
     let bytes = tokio::fs::read(&selected)
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to read ui asset: {}", e)))?;
-    let content_type = mime_guess::from_path(&selected).first_or_octet_stream().to_string();
+    let content_type = mime_guess::from_path(&selected)
+        .first_or_octet_stream()
+        .to_string();
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -163,7 +198,8 @@ pub async fn proxy_plugin_api(
     } else {
         format!("{}/{}?{}", base_url.trim_end_matches('/'), path, query)
     };
-    let url = Url::parse(&target).map_err(|e| internal_error(&ctx, format!("invalid plugin api target url: {}", e)))?;
+    let url = Url::parse(&target)
+        .map_err(|e| internal_error(&ctx, format!("invalid plugin api target url: {}", e)))?;
     let client = reqwest::Client::new();
     let mut builder = client.request(method, url);
     for (name, value) in &headers {
@@ -185,10 +221,12 @@ pub async fn proxy_plugin_api(
     for (name, value) in response.headers() {
         resp_builder = resp_builder.header(name, value);
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| internal_error(&ctx, format!("failed to read plugin api response body: {}", e)))?;
+    let body = response.bytes().await.map_err(|e| {
+        internal_error(
+            &ctx,
+            format!("failed to read plugin api response body: {}", e),
+        )
+    })?;
     let resp = resp_builder
         .body(Body::from(body))
         .map_err(|e| internal_error(&ctx, format!("failed to build plugin api response: {}", e)))?;
@@ -270,12 +308,14 @@ async fn forward_websocket(client_socket: WebSocket, target: Url) -> Result<(), 
                 AxumWsMessage::Ping(v) => TungsteniteMessage::Ping(v),
                 AxumWsMessage::Pong(v) => TungsteniteMessage::Pong(v),
                 AxumWsMessage::Close(frame) => {
-                    let _ = server_sink.send(TungsteniteMessage::Close(frame.map(|f| {
-                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                            code: f.code.into(),
-                            reason: f.reason.as_str().into(),
-                        }
-                    }))).await;
+                    let _ = server_sink
+                        .send(TungsteniteMessage::Close(frame.map(|f| {
+                            tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                code: f.code.into(),
+                                reason: f.reason.as_str().into(),
+                            }
+                        })))
+                        .await;
                     break;
                 }
             };
@@ -293,12 +333,14 @@ async fn forward_websocket(client_socket: WebSocket, target: Url) -> Result<(), 
                 TungsteniteMessage::Ping(v) => AxumWsMessage::Ping(v),
                 TungsteniteMessage::Pong(v) => AxumWsMessage::Pong(v),
                 TungsteniteMessage::Close(frame) => {
-                    let _ = client_sink.send(AxumWsMessage::Close(frame.map(|f| {
-                        axum::extract::ws::CloseFrame {
-                            code: f.code.into(),
-                            reason: f.reason.as_str().into(),
-                        }
-                    }))).await;
+                    let _ = client_sink
+                        .send(AxumWsMessage::Close(frame.map(|f| {
+                            axum::extract::ws::CloseFrame {
+                                code: f.code.into(),
+                                reason: f.reason.as_str().into(),
+                            }
+                        })))
+                        .await;
                     break;
                 }
                 TungsteniteMessage::Frame(_) => continue,
@@ -320,8 +362,17 @@ async fn forward_websocket(client_socket: WebSocket, target: Url) -> Result<(), 
 pub fn create_public_router(_db: Arc<sea_orm::DatabaseConnection>) -> axum::Router {
     axum::Router::new()
         .route("/{plugin_id}/ui", axum::routing::get(serve_plugin_ui_root))
-        .route("/{plugin_id}/ui/{*path}", axum::routing::get(serve_plugin_ui))
-        .route("/{plugin_id}/api/{*path}", axum::routing::any(proxy_plugin_api))
+        .route(
+            "/{plugin_id}/ui/{*path}",
+            axum::routing::get(serve_plugin_ui),
+        )
+        .route(
+            "/{plugin_id}/api/{*path}",
+            axum::routing::any(proxy_plugin_api),
+        )
         .route("/{plugin_id}/ws", axum::routing::get(proxy_plugin_ws_root))
-        .route("/{plugin_id}/ws/{*path}", axum::routing::get(proxy_plugin_ws))
+        .route(
+            "/{plugin_id}/ws/{*path}",
+            axum::routing::get(proxy_plugin_ws),
+        )
 }

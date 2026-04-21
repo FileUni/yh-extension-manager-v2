@@ -45,9 +45,8 @@ pub async fn replace_plugin_permission_grants(
         let existing = crate::entities::plugin_permission_grant::Entity::find()
             .filter(crate::entities::plugin_permission_grant::Column::PluginId.eq(plugin_id))
             .filter(
-                crate::entities::plugin_permission_grant::Column::PermissionKey.eq(
-                    grant.permission_key.as_str(),
-                ),
+                crate::entities::plugin_permission_grant::Column::PermissionKey
+                    .eq(grant.permission_key.as_str()),
             )
             .one(db)
             .await?;
@@ -88,9 +87,11 @@ pub async fn delete_plugin_permission_grants(
     db: &DatabaseConnection,
     plugin_id: &str,
 ) -> Result<u64, sea_orm::DbErr> {
-    Ok(crate::entities::plugin_permission_grant::Entity::delete_many()
-        .filter(crate::entities::plugin_permission_grant::Column::PluginId.eq(plugin_id))
-        .exec(db)
-        .await?
-        .rows_affected)
+    Ok(
+        crate::entities::plugin_permission_grant::Entity::delete_many()
+            .filter(crate::entities::plugin_permission_grant::Column::PluginId.eq(plugin_id))
+            .exec(db)
+            .await?
+            .rows_affected,
+    )
 }

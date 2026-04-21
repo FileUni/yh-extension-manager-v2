@@ -36,6 +36,8 @@ pub async fn start_docker_runtime(
     docker_engine_command: &str,
     host_api_base_url: &str,
     host_api_token: &str,
+    plugin_config_dir: &str,
+    plugin_config_file: &str,
 ) -> Result<RuntimeHandle, String> {
     let instance_name = format!("fileuni-plg-{}", plugin_id.replace('.', "-"));
     if let Some(archive) = &runtime.oci_archive {
@@ -64,7 +66,10 @@ pub async fn start_docker_runtime(
             plugin_id: plugin_id.to_string(),
             runtime_kind: "docker".to_string(),
             status: RuntimeStatus::Running,
-            detail: install_root.join(compose_file).to_string_lossy().to_string(),
+            detail: install_root
+                .join(compose_file)
+                .to_string_lossy()
+                .to_string(),
             pid: None,
             instance_ref: Some(instance_name),
             route_base_url: runtime.base_url.clone(),
@@ -81,13 +86,21 @@ pub async fn start_docker_runtime(
         for port in ports {
             let host = port.host.unwrap_or(port.container);
             let protocol = port.protocol.as_deref().unwrap_or("tcp");
-            command.arg("-p").arg(format!("{}:{}/{}", host, port.container, protocol));
+            command
+                .arg("-p")
+                .arg(format!("{}:{}/{}", host, port.container, protocol));
         }
     }
     if let Some(volumes) = &runtime.volumes {
         for volume in volumes {
-            let suffix = if volume.read_only.unwrap_or(false) { ":ro" } else { "" };
-            command.arg("-v").arg(format!("{}:{}{}", volume.source, volume.target, suffix));
+            let suffix = if volume.read_only.unwrap_or(false) {
+                ":ro"
+            } else {
+                ""
+            };
+            command
+                .arg("-v")
+                .arg(format!("{}:{}{}", volume.source, volume.target, suffix));
         }
     }
     if let Some(env) = &runtime.env {
@@ -95,13 +108,22 @@ pub async fn start_docker_runtime(
             command.arg("-e").arg(format!("{}={}", key, value));
         }
     }
-    command.arg("-e").arg(format!("FILEUNI_PLUGIN_ID={}", plugin_id));
     command
         .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_HOST_API_BASE_URL={}", host_api_base_url));
+        .arg(format!("FILEUNI_PLUGIN_ID={}", plugin_id));
+    command.arg("-e").arg(format!(
+        "FILEUNI_PLUGIN_HOST_API_BASE_URL={}",
+        host_api_base_url
+    ));
     command
         .arg("-e")
         .arg(format!("FILEUNI_PLUGIN_HOST_API_TOKEN={}", host_api_token));
+    command
+        .arg("-e")
+        .arg(format!("FILEUNI_PLUGIN_CONFIG_DIR={}", plugin_config_dir));
+    command
+        .arg("-e")
+        .arg(format!("FILEUNI_PLUGIN_CONFIG_FILE={}", plugin_config_file));
     command.arg(image);
     if let Some(cmd) = &runtime.command {
         command.args(cmd);

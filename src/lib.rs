@@ -1,7 +1,7 @@
 pub mod config;
 pub mod entities;
-pub mod host_api;
 pub mod handlers;
+pub mod host_api;
 pub mod installer;
 pub mod manager;
 pub mod manifest;

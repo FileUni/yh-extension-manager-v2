@@ -19,6 +19,12 @@ pub struct Model {
     pub icon: String,
     #[sea_orm(column_type = "Text")]
     pub visibility: String,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub group_key: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub position: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub required_permission: Option<String>,
     #[sea_orm(column_type = "Integer")]
     pub sort_order: i32,
     #[schema(value_type = String, format = DateTime)]

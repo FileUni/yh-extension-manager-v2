@@ -1,4 +1,6 @@
-use crate::entities::{plugin_audit_log, plugin_nav_item, plugin_registry, plugin_task, plugin_version};
+use crate::entities::{
+    plugin_audit_log, plugin_nav_item, plugin_registry, plugin_task, plugin_version,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder, QuerySelect, Set,

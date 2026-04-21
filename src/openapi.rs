@@ -41,6 +41,7 @@ use utoipa::OpenApi;
         crate::host_api::list_tasks,
         crate::host_api::upsert_nav_item,
         crate::host_api::list_nav_items,
+        crate::host_api::ensure_plugin_config_file,
     ),
     components(
         schemas(
@@ -93,6 +94,8 @@ use utoipa::OpenApi;
             crate::host_api::HostNavItemResponse,
             crate::host_api::HostNavItemListQuery,
             crate::host_api::HostNavItemListResponse,
+            crate::host_api::HostPluginConfigEnsureRequest,
+            crate::host_api::HostPluginConfigEnsureResponse,
             crate::entities::plugin_registry::Model,
             crate::entities::plugin_version::Model,
             crate::entities::plugin_audit_log::Model,

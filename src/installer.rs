@@ -1,6 +1,8 @@
 use crate::entities::{plugin_audit_log, plugin_registry, plugin_version};
 use crate::manifest::{PluginManifest, PluginPermission, PluginRuntimeManifest};
-use crate::permissions::{PluginPermissionGrantItem, permission_keys_to_items, replace_plugin_permission_grants};
+use crate::permissions::{
+    PluginPermissionGrantItem, permission_keys_to_items, replace_plugin_permission_grants,
+};
 use crate::runtime;
 use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -40,7 +42,10 @@ fn safe_join(base: &Path, name: &str) -> Result<PathBuf, String> {
     if path.is_absolute() {
         return Err(format!("zip entry cannot be absolute: {}", name));
     }
-    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return Err(format!("zip entry cannot escape package root: {}", name));
     }
     Ok(base.join(path))
@@ -66,16 +71,32 @@ pub async fn read_manifest_from_package_dir(package_dir: &Path) -> Result<Plugin
     let manifest_path = package_dir.join("plugin.json");
     let manifest_text = tokio::fs::read_to_string(&manifest_path)
         .await
-        .map_err(|e| format!("failed to read installed plugin manifest '{}': {}", manifest_path.display(), e))?;
-    let manifest: PluginManifest = serde_json::from_str(&manifest_text)
-        .map_err(|e| format!("invalid installed plugin manifest '{}': {}", manifest_path.display(), e))?;
+        .map_err(|e| {
+            format!(
+                "failed to read installed plugin manifest '{}': {}",
+                manifest_path.display(),
+                e
+            )
+        })?;
+    let manifest: PluginManifest = serde_json::from_str(&manifest_text).map_err(|e| {
+        format!(
+            "invalid installed plugin manifest '{}': {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
     manifest.validate()?;
     Ok(manifest)
 }
 
 fn extract_plugin_zip_to_dir_blocking(zip_bytes: &[u8], target_dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(target_dir)
-        .map_err(|e| format!("failed to create package dir '{}': {}", target_dir.display(), e))?;
+    std::fs::create_dir_all(target_dir).map_err(|e| {
+        format!(
+            "failed to create package dir '{}': {}",
+            target_dir.display(),
+            e
+        )
+    })?;
     let reader = std::io::Cursor::new(zip_bytes);
     let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin zip: {}", e))?;
 
@@ -85,21 +106,35 @@ fn extract_plugin_zip_to_dir_blocking(zip_bytes: &[u8], target_dir: &Path) -> Re
             .map_err(|e| format!("failed to read zip entry {}: {}", index, e))?;
         let out_path = safe_join(target_dir, entry.name())?;
         if entry.is_dir() {
-            std::fs::create_dir_all(&out_path)
-                .map_err(|e| format!("failed to create extracted dir '{}': {}", out_path.display(), e))?;
+            std::fs::create_dir_all(&out_path).map_err(|e| {
+                format!(
+                    "failed to create extracted dir '{}': {}",
+                    out_path.display(),
+                    e
+                )
+            })?;
             continue;
         }
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                format!("failed to create extracted parent dir '{}': {}", parent.display(), e)
+                format!(
+                    "failed to create extracted parent dir '{}': {}",
+                    parent.display(),
+                    e
+                )
             })?;
         }
         let mut buffer = Vec::new();
         entry
             .read_to_end(&mut buffer)
             .map_err(|e| format!("failed to read zip entry '{}': {}", entry.name(), e))?;
-        std::fs::write(&out_path, buffer)
-            .map_err(|e| format!("failed to write extracted file '{}': {}", out_path.display(), e))?;
+        std::fs::write(&out_path, buffer).map_err(|e| {
+            format!(
+                "failed to write extracted file '{}': {}",
+                out_path.display(),
+                e
+            )
+        })?;
     }
 
     Ok(())
@@ -113,33 +148,37 @@ pub async fn extract_plugin_zip_to_dir(zip_bytes: &[u8], target_dir: &Path) -> R
         .map_err(|e| format!("plugin extraction task failed: {}", e))?
 }
 
-fn build_default_permission_grants(permissions: &[PluginPermission]) -> Vec<PluginPermissionGrantItem> {
+fn build_default_permission_grants(
+    permissions: &[PluginPermission],
+) -> Vec<PluginPermissionGrantItem> {
     permission_keys_to_items(permissions, &[])
 }
 
-fn validate_prepared_runtime(manifest: &PluginManifest, install_root: &Path) -> Result<String, String> {
+fn validate_prepared_runtime(
+    manifest: &PluginManifest,
+    install_root: &Path,
+) -> Result<String, String> {
     let handle = match &manifest.runtime {
-        PluginRuntimeManifest::WasmComponent(runtime_manifest) => runtime::wasm::prepare_wasm_runtime(
-            &manifest.id,
-            install_root,
-            runtime_manifest,
-            "wasm-component",
-        )?,
+        PluginRuntimeManifest::WasmComponent(runtime_manifest) => {
+            runtime::wasm::prepare_wasm_runtime(
+                &manifest.id,
+                install_root,
+                runtime_manifest,
+                "wasm-component",
+            )?
+        }
         PluginRuntimeManifest::WasmModule(runtime_manifest) => runtime::wasm::prepare_wasm_runtime(
             &manifest.id,
             install_root,
             runtime_manifest,
             "wasm-module",
         )?,
-        PluginRuntimeManifest::Process(runtime_manifest) => runtime::process::prepare_process_runtime(
-            &manifest.id,
-            install_root,
-            runtime_manifest,
-        )?,
-        PluginRuntimeManifest::Docker(runtime_manifest) => runtime::docker::prepare_docker_runtime(
-            &manifest.id,
-            runtime_manifest,
-        )?,
+        PluginRuntimeManifest::Process(runtime_manifest) => {
+            runtime::process::prepare_process_runtime(&manifest.id, install_root, runtime_manifest)?
+        }
+        PluginRuntimeManifest::Docker(runtime_manifest) => {
+            runtime::docker::prepare_docker_runtime(&manifest.id, runtime_manifest)?
+        }
     };
     Ok(handle.runtime_kind)
 }
@@ -159,13 +198,20 @@ pub async fn install_plugin_from_zip_bytes(
     }
 
     let package_dir = packages_root.join(&manifest.id).join(&manifest.version);
-    if tokio::fs::try_exists(&package_dir)
-        .await
-        .map_err(|e| format!("failed to check package dir '{}': {}", package_dir.display(), e))?
-    {
-        tokio::fs::remove_dir_all(&package_dir)
-            .await
-            .map_err(|e| format!("failed to replace existing package dir '{}': {}", package_dir.display(), e))?;
+    if tokio::fs::try_exists(&package_dir).await.map_err(|e| {
+        format!(
+            "failed to check package dir '{}': {}",
+            package_dir.display(),
+            e
+        )
+    })? {
+        tokio::fs::remove_dir_all(&package_dir).await.map_err(|e| {
+            format!(
+                "failed to replace existing package dir '{}': {}",
+                package_dir.display(),
+                e
+            )
+        })?;
     }
 
     extract_plugin_zip_to_dir(zip_bytes, &package_dir).await?;
@@ -186,7 +232,8 @@ pub async fn install_plugin_from_zip_bytes(
         active.install_status = Set("installed".to_string());
         active.market_origin = Set(options.market_origin.clone());
         active.updated_at = Set(now.into());
-        active.update(db)
+        active
+            .update(db)
             .await
             .map_err(|e| format!("failed to update plugin registry: {}", e))?;
     } else {
@@ -202,7 +249,8 @@ pub async fn install_plugin_from_zip_bytes(
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
         };
-        model.insert(db)
+        model
+            .insert(db)
             .await
             .map_err(|e| format!("failed to insert plugin registry: {}", e))?;
     }
@@ -222,15 +270,22 @@ pub async fn install_plugin_from_zip_bytes(
         .await
         .map_err(|e| format!("failed to insert plugin version: {}", e))?;
 
-    replace_plugin_permission_grants(db, &manifest.id, &build_default_permission_grants(&manifest.permissions))
-        .await
-        .map_err(|e| format!("failed to save plugin permission grants: {}", e))?;
+    replace_plugin_permission_grants(
+        db,
+        &manifest.id,
+        &build_default_permission_grants(&manifest.permissions),
+    )
+    .await
+    .map_err(|e| format!("failed to save plugin permission grants: {}", e))?;
 
     let audit_model = plugin_audit_log::ActiveModel {
         id: Set(uuid::Uuid::now_v7().to_string()),
         plugin_id: Set(manifest.id.clone()),
         action: Set("install".to_string()),
-        message: Set(format!("Installed plugin {} {}", manifest.id, manifest.version)),
+        message: Set(format!(
+            "Installed plugin {} {}",
+            manifest.id, manifest.version
+        )),
         actor_user_id: Set(options.actor_user_id),
         created_at: Set(now.into()),
     };

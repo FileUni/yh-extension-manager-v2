@@ -1,15 +1,22 @@
-use axum::{Json, Router, extract::{Path, Query, State}, routing::{delete, get, post}};
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    routing::{delete, get, post},
+};
 use bytes::Bytes;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use sea_orm::DatabaseConnection;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set,
+    Statement,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use utoipa::ToSchema;
 use yh_config_infra::RequestContext;
-use yh_system::config::get_system_config;
 use yh_filemanager_vfs_storage_hub::vfs::traits::VfsStorage;
 use yh_response::{AppError, Resp};
+use yh_system::config::get_system_config;
 
 #[derive(Clone)]
 pub struct HostApiState {
@@ -199,6 +206,7 @@ pub struct HostMigrationExecuteResponse {
     pub migration_key: String,
     pub status: String,
     pub state_json: String,
+    pub executed_statements: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -239,6 +247,9 @@ pub struct HostNavItemUpsertRequest {
     pub route: String,
     pub icon: String,
     pub visibility: String,
+    pub group_key: Option<String>,
+    pub position: Option<String>,
+    pub required_permission: Option<String>,
     pub sort_order: i32,
 }
 
@@ -250,6 +261,9 @@ pub struct HostNavItemResponse {
     pub route: String,
     pub icon: String,
     pub visibility: String,
+    pub group_key: Option<String>,
+    pub position: Option<String>,
+    pub required_permission: Option<String>,
     pub sort_order: i32,
 }
 
@@ -263,6 +277,19 @@ pub struct HostNavItemListResponse {
     pub items: Vec<HostNavItemResponse>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostPluginConfigEnsureRequest {
+    pub plugin_id: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostPluginConfigEnsureResponse {
+    pub plugin_id: String,
+    pub config_dir: String,
+    pub config_file: String,
+}
+
 fn require_user(ctx: &RequestContext) -> Result<(&str, i16, Option<&str>), AppError> {
     let user = ctx.user_info.as_ref().ok_or_else(|| {
         AppError::unauthorized(
@@ -271,21 +298,39 @@ fn require_user(ctx: &RequestContext) -> Result<(&str, i16, Option<&str>), AppEr
             Arc::clone(&ctx.client_ip),
         )
     })?;
-    Ok((user.user_id.as_ref(), user.role_id, user.username.as_deref()))
+    Ok((
+        user.user_id.as_ref(),
+        user.role_id,
+        user.username.as_deref(),
+    ))
 }
 
 fn internal_error(ctx: &RequestContext, message: impl Into<String>) -> AppError {
-    AppError::internal(message, Arc::clone(&ctx.request_id), Arc::clone(&ctx.client_ip))
+    AppError::internal(
+        message,
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+    )
 }
 
 fn sanitize_sqlite_component(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' { ch } else { '_' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
-fn validate_host_plugin_identifier(value: &str, field_name: &str, ctx: &RequestContext) -> Result<String, AppError> {
+fn validate_host_plugin_identifier(
+    value: &str,
+    field_name: &str,
+    ctx: &RequestContext,
+) -> Result<String, AppError> {
     let sanitized = sanitize_sqlite_component(value);
     if sanitized.trim().is_empty() {
         return Err(AppError::new(
@@ -300,6 +345,73 @@ fn validate_host_plugin_identifier(value: &str, field_name: &str, ctx: &RequestC
 
 fn kv_namespaced_key(plugin_id: &str, key: &str) -> String {
     format!("plugin:{}:{}", plugin_id, key)
+}
+
+async fn ensure_plugin_config_path(
+    plugin_id: &str,
+    file_name: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let manager = crate::manager::get_plugin_runtime_manager()
+        .ok_or_else(|| "plugin runtime manager is not initialized".to_string())?;
+    let layout = manager.status_snapshot().layout;
+    let plugin_component = sanitize_sqlite_component(plugin_id);
+    let file_component = sanitize_sqlite_component(file_name);
+    let config_dir = PathBuf::from(layout.config_dir).join(&plugin_component);
+    tokio::fs::create_dir_all(&config_dir).await.map_err(|e| {
+        format!(
+            "failed to create plugin config dir '{}': {}",
+            config_dir.display(),
+            e
+        )
+    })?;
+    let config_file = config_dir.join(file_component);
+    Ok((config_dir, config_file))
+}
+
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    sql.split(";\n")
+        .map(str::trim)
+        .filter(|stmt| !stmt.is_empty())
+        .map(|stmt| {
+            if stmt.ends_with(';') {
+                stmt.to_string()
+            } else {
+                format!("{};", stmt)
+            }
+        })
+        .collect()
+}
+
+async fn load_installed_migration_sql(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    scope: &str,
+    migration_key: &str,
+) -> Result<String, String> {
+    let plugin = crate::registry::get_registry_by_id(db, plugin_id)
+        .await
+        .map_err(|e| format!("failed to load plugin registry: {}", e))?
+        .ok_or_else(|| format!("plugin '{}' not found", plugin_id))?;
+    let current_version = plugin
+        .current_version
+        .ok_or_else(|| format!("plugin '{}' has no installed version", plugin_id))?;
+    let version =
+        crate::registry::get_version_by_plugin_and_version(db, plugin_id, &current_version)
+            .await
+            .map_err(|e| format!("failed to load plugin version: {}", e))?
+            .ok_or_else(|| {
+                format!(
+                    "plugin '{}' version '{}' not found",
+                    plugin_id, current_version
+                )
+            })?;
+    let path = PathBuf::from(version.package_path)
+        .join("migrations")
+        .join(scope)
+        .join(format!("{}.sql", migration_key));
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("failed to read migration file '{}': {}", path.display(), e))
 }
 
 async fn create_user_scoped_engine(
@@ -374,7 +486,11 @@ pub async fn get_user_by_id(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/auth/has-permission", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/auth/has-permission",
+    tag = "Plugins V2"
+)]
 pub async fn check_permission(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -498,7 +614,10 @@ pub async fn write_vfs_text(
 ) -> Result<Json<Resp>, AppError> {
     let storage = create_user_scoped_engine(&state, &ctx).await?;
     storage
-        .write(&payload.logical_path, Bytes::from(payload.content.into_bytes()))
+        .write(
+            &payload.logical_path,
+            Bytes::from(payload.content.into_bytes()),
+        )
         .await
         .map_err(|e| internal_error(&ctx, format!("vfs write failed: {}", e)))?;
     Ok(Json(Resp::ok(
@@ -526,20 +645,27 @@ pub async fn get_db_info(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/db/sqlite/ensure", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/db/sqlite/ensure",
+    tag = "Plugins V2"
+)]
 pub async fn ensure_sqlite_database(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostSqliteEnsureRequest>,
 ) -> Result<Json<Resp>, AppError> {
     let (user_id, _, _) = require_user(&ctx)?;
-    let system_cfg = get_system_config().ok_or_else(|| {
-        internal_error(&ctx, "system config manager is not initialized")
-    })?;
+    let system_cfg = get_system_config()
+        .ok_or_else(|| internal_error(&ctx, "system config manager is not initialized"))?;
     let temp_dir = system_cfg.read().await.system.get_temp_dir().to_string();
     let plugin_dir = sanitize_sqlite_component(&payload.plugin_id);
     let db_name = sanitize_sqlite_component(&payload.database_name);
     let logical_path = format!("/.plugins/{}/sqlite/{}/{}.db", plugin_dir, user_id, db_name);
-    let physical_dir = PathBuf::from(&temp_dir).join("extension").join("sqlite").join(&plugin_dir).join(user_id);
+    let physical_dir = PathBuf::from(&temp_dir)
+        .join("extension")
+        .join("sqlite")
+        .join(&plugin_dir)
+        .join(user_id);
     tokio::fs::create_dir_all(&physical_dir)
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to create sqlite broker dir: {}", e)))?;
@@ -548,9 +674,9 @@ pub async fn ensure_sqlite_database(
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to check sqlite broker file: {}", e)))?
     {
-        let _ = tokio::fs::File::create(&physical_path)
-            .await
-            .map_err(|e| internal_error(&ctx, format!("failed to create sqlite broker file: {}", e)))?;
+        let _ = tokio::fs::File::create(&physical_path).await.map_err(|e| {
+            internal_error(&ctx, format!("failed to create sqlite broker file: {}", e))
+        })?;
     }
     let dsn = format!("sqlite://{}?mode=rwc", physical_path.to_string_lossy());
     let payload = HostSqliteEnsureResponse {
@@ -567,7 +693,11 @@ pub async fn ensure_sqlite_database(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/db/shared/upsert", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/db/shared/upsert",
+    tag = "Plugins V2"
+)]
 pub async fn upsert_shared_record(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -592,7 +722,8 @@ pub async fn upsert_shared_record(
         let mut active: crate::entities::plugin_shared_record::ActiveModel = existing.into();
         active.payload_json = Set(payload.payload_json.clone());
         active.updated_at = Set(now.into());
-        active.update(state.db.as_ref())
+        active
+            .update(state.db.as_ref())
             .await
             .map_err(|e| internal_error(&ctx, format!("failed to update shared record: {}", e)))?
     } else {
@@ -643,12 +774,14 @@ pub async fn get_shared_record(
         .one(state.db.as_ref())
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to query shared record: {}", e)))?
-        .ok_or_else(|| AppError::new(
-            yh_response::error::ErrorCode::NotFound,
-            "shared record not found",
-            Arc::clone(&ctx.request_id),
-            Arc::clone(&ctx.client_ip),
-        ))?;
+        .ok_or_else(|| {
+            AppError::new(
+                yh_response::error::ErrorCode::NotFound,
+                "shared record not found",
+                Arc::clone(&ctx.request_id),
+                Arc::clone(&ctx.client_ip),
+            )
+        })?;
     let response = HostSharedRecordResponse {
         plugin_id: model.plugin_id,
         collection: model.collection,
@@ -696,7 +829,11 @@ pub async fn list_shared_records(
     )))
 }
 
-#[utoipa::path(delete, path = "/api/v1/plugin-host/db/shared/delete", tag = "Plugins V2")]
+#[utoipa::path(
+    delete,
+    path = "/api/v1/plugin-host/db/shared/delete",
+    tag = "Plugins V2"
+)]
 pub async fn delete_shared_record(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -724,7 +861,11 @@ pub async fn delete_shared_record(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/db/migrations/upsert", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/db/migrations/upsert",
+    tag = "Plugins V2"
+)]
 pub async fn upsert_migration_state(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -733,11 +874,15 @@ pub async fn upsert_migration_state(
     let _ = require_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
-    let migration_key = validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+    let migration_key =
+        validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
     let existing = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
-        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .filter(
+            crate::entities::plugin_migration_state::Column::MigrationKey
+                .eq(migration_key.as_str()),
+        )
         .one(state.db.as_ref())
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?;
@@ -746,7 +891,8 @@ pub async fn upsert_migration_state(
         let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
         active.state_json = Set(payload.state_json.clone());
         active.updated_at = Set(now.into());
-        active.update(state.db.as_ref())
+        active
+            .update(state.db.as_ref())
             .await
             .map_err(|e| internal_error(&ctx, format!("failed to update migration state: {}", e)))?
     } else {
@@ -776,7 +922,11 @@ pub async fn upsert_migration_state(
     )))
 }
 
-#[utoipa::path(get, path = "/api/v1/plugin-host/db/migrations/get", tag = "Plugins V2")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/plugin-host/db/migrations/get",
+    tag = "Plugins V2"
+)]
 pub async fn get_migration_state(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -785,20 +935,26 @@ pub async fn get_migration_state(
     let _ = require_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
-    let migration_key = validate_host_plugin_identifier(&query.migration_key, "migration_key", &ctx)?;
+    let migration_key =
+        validate_host_plugin_identifier(&query.migration_key, "migration_key", &ctx)?;
     let model = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
-        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .filter(
+            crate::entities::plugin_migration_state::Column::MigrationKey
+                .eq(migration_key.as_str()),
+        )
         .one(state.db.as_ref())
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?
-        .ok_or_else(|| AppError::new(
-            yh_response::error::ErrorCode::NotFound,
-            "migration state not found",
-            Arc::clone(&ctx.request_id),
-            Arc::clone(&ctx.client_ip),
-        ))?;
+        .ok_or_else(|| {
+            AppError::new(
+                yh_response::error::ErrorCode::NotFound,
+                "migration state not found",
+                Arc::clone(&ctx.request_id),
+                Arc::clone(&ctx.client_ip),
+            )
+        })?;
     let response = HostMigrationStateResponse {
         plugin_id: model.plugin_id,
         scope: model.scope,
@@ -812,7 +968,11 @@ pub async fn get_migration_state(
     )))
 }
 
-#[utoipa::path(get, path = "/api/v1/plugin-host/db/migrations/list", tag = "Plugins V2")]
+#[utoipa::path(
+    get,
+    path = "/api/v1/plugin-host/db/migrations/list",
+    tag = "Plugins V2"
+)]
 pub async fn list_migration_states(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -843,7 +1003,11 @@ pub async fn list_migration_states(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/db/migrations/execute", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/db/migrations/execute",
+    tag = "Plugins V2"
+)]
 pub async fn execute_migration(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
@@ -852,11 +1016,34 @@ pub async fn execute_migration(
     let _ = require_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
-    let migration_key = validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+    let migration_key =
+        validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+    let sql = load_installed_migration_sql(state.db.as_ref(), &plugin_id, &scope, &migration_key)
+        .await
+        .map_err(|e| internal_error(&ctx, e))?;
+    let statements = split_sql_statements(&sql);
+    if statements.is_empty() {
+        return Err(AppError::new(
+            yh_response::error::ErrorCode::BadRequest,
+            "migration file is empty",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        ));
+    }
+    let backend = state.db.get_database_backend();
+    for sql in &statements {
+        let stmt = Statement::from_string(backend, sql.clone());
+        state
+            .db
+            .execute(stmt)
+            .await
+            .map_err(|e| internal_error(&ctx, format!("migration execution failed: {}", e)))?;
+    }
     let state_json = serde_json::json!({
         "status": "applied",
         "description": payload.description,
         "applied_at": chrono::Utc::now().to_rfc3339(),
+        "executed_statements": statements.len(),
     })
     .to_string();
     let model = crate::entities::plugin_migration_state::ActiveModel {
@@ -871,22 +1058,26 @@ pub async fn execute_migration(
     let existing = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
-        .filter(crate::entities::plugin_migration_state::Column::MigrationKey.eq(migration_key.as_str()))
+        .filter(
+            crate::entities::plugin_migration_state::Column::MigrationKey
+                .eq(migration_key.as_str()),
+        )
         .one(state.db.as_ref())
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to query migration state: {}", e)))?;
-    let stored = if let Some(existing) = existing {
-        let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
-        active.state_json = Set(state_json.clone());
-        active.updated_at = Set(chrono::Utc::now().into());
-        active.update(state.db.as_ref())
-            .await
-            .map_err(|e| internal_error(&ctx, format!("failed to update migration state: {}", e)))?
-    } else {
-        model.insert(state.db.as_ref())
-            .await
-            .map_err(|e| internal_error(&ctx, format!("failed to insert migration state: {}", e)))?
-    };
+    let stored =
+        if let Some(existing) = existing {
+            let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
+            active.state_json = Set(state_json.clone());
+            active.updated_at = Set(chrono::Utc::now().into());
+            active.update(state.db.as_ref()).await.map_err(|e| {
+                internal_error(&ctx, format!("failed to update migration state: {}", e))
+            })?
+        } else {
+            model.insert(state.db.as_ref()).await.map_err(|e| {
+                internal_error(&ctx, format!("failed to insert migration state: {}", e))
+            })?
+        };
     Ok(Json(Resp::ok(
         Arc::clone(&ctx.request_id),
         Arc::clone(&ctx.client_ip),
@@ -896,6 +1087,7 @@ pub async fn execute_migration(
             migration_key: stored.migration_key,
             status: "applied".to_string(),
             state_json: stored.state_json,
+            executed_statements: statements.len(),
         })
         .map_err(|e| internal_error(&ctx, e.to_string()))?,
     )))
@@ -924,7 +1116,8 @@ pub async fn upsert_task(
         active.cron = Set(payload.cron.clone());
         active.last_error = Set(payload.last_error.clone());
         active.updated_at = Set(now.into());
-        active.update(state.db.as_ref())
+        active
+            .update(state.db.as_ref())
             .await
             .map_err(|e| internal_error(&ctx, format!("failed to update plugin task: {}", e)))?
     } else {
@@ -1011,9 +1204,13 @@ pub async fn upsert_nav_item(
         active.route = Set(payload.route.clone());
         active.icon = Set(payload.icon.clone());
         active.visibility = Set(payload.visibility.clone());
+        active.group_key = Set(payload.group_key.clone());
+        active.position = Set(payload.position.clone());
+        active.required_permission = Set(payload.required_permission.clone());
         active.sort_order = Set(payload.sort_order);
         active.updated_at = Set(now.into());
-        active.update(state.db.as_ref())
+        active
+            .update(state.db.as_ref())
             .await
             .map_err(|e| internal_error(&ctx, format!("failed to update nav item: {}", e)))?
     } else {
@@ -1025,6 +1222,9 @@ pub async fn upsert_nav_item(
             route: Set(payload.route.clone()),
             icon: Set(payload.icon.clone()),
             visibility: Set(payload.visibility.clone()),
+            group_key: Set(payload.group_key.clone()),
+            position: Set(payload.position.clone()),
+            required_permission: Set(payload.required_permission.clone()),
             sort_order: Set(payload.sort_order),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
@@ -1043,6 +1243,9 @@ pub async fn upsert_nav_item(
             route: model.route,
             icon: model.icon,
             visibility: model.visibility,
+            group_key: model.group_key,
+            position: model.position,
+            required_permission: model.required_permission,
             sort_order: model.sort_order,
         })
         .map_err(|e| internal_error(&ctx, e.to_string()))?,
@@ -1059,7 +1262,8 @@ pub async fn list_nav_items(
     let mut select = crate::entities::plugin_nav_item::Entity::find();
     if let Some(plugin_id) = query.plugin_id.as_deref() {
         let plugin_id = validate_host_plugin_identifier(plugin_id, "plugin_id", &ctx)?;
-        select = select.filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()));
+        select = select
+            .filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()));
     }
     let items = select
         .all(state.db.as_ref())
@@ -1073,6 +1277,9 @@ pub async fn list_nav_items(
             route: row.route,
             icon: row.icon,
             visibility: row.visibility,
+            group_key: row.group_key,
+            position: row.position,
+            required_permission: row.required_permission,
             sort_order: row.sort_order,
         })
         .collect::<Vec<_>>();
@@ -1081,6 +1288,41 @@ pub async fn list_nav_items(
         Arc::clone(&ctx.client_ip),
         serde_json::to_value(HostNavItemListResponse { items })
             .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/config/ensure", tag = "Plugins V2")]
+pub async fn ensure_plugin_config_file(
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostPluginConfigEnsureRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let _ = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+    let (config_dir, config_file) = ensure_plugin_config_path(&plugin_id, &payload.file_name)
+        .await
+        .map_err(|e| internal_error(&ctx, e))?;
+    if !tokio::fs::try_exists(&config_file)
+        .await
+        .map_err(|e| internal_error(&ctx, format!("failed to check plugin config file: {}", e)))?
+    {
+        tokio::fs::write(&config_file, b"# plugin config\n")
+            .await
+            .map_err(|e| {
+                internal_error(
+                    &ctx,
+                    format!("failed to initialize plugin config file: {}", e),
+                )
+            })?;
+    }
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostPluginConfigEnsureResponse {
+            plugin_id,
+            config_dir: config_dir.to_string_lossy().to_string(),
+            config_file: config_file.to_string_lossy().to_string(),
+        })
+        .map_err(|e| internal_error(&ctx, e.to_string()))?,
     )))
 }
 
@@ -1109,5 +1351,6 @@ pub fn create_host_api_router(db: Arc<DatabaseConnection>) -> Router {
         .route("/tasks/list", get(list_tasks))
         .route("/nav/upsert", post(upsert_nav_item))
         .route("/nav/list", get(list_nav_items))
+        .route("/config/ensure", post(ensure_plugin_config_file))
         .with_state(HostApiState { db })
 }

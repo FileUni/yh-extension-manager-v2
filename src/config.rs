@@ -165,7 +165,10 @@ impl ExtensionManagerV2Config {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, ConfigDoc)]
 pub struct ExtensionManagerV2AppConfig {
-    #[config(desc_zh = "插件系统 v2 配置", desc_en = "Plugin system v2 configuration")]
+    #[config(
+        desc_zh = "插件系统 v2 配置",
+        desc_en = "Plugin system v2 configuration"
+    )]
     pub extension_manager_v2: ExtensionManagerV2Config,
 }
 
