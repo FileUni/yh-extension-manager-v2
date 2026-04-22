@@ -1,22 +1,27 @@
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
+    middleware::Next,
+    response::Response,
     routing::{delete, get, post},
 };
 use bytes::Bytes;
 use sea_orm::DatabaseConnection;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend, EntityTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set,
     Statement,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use utoipa::ToSchema;
-use yh_config_infra::RequestContext;
+use yh_config_infra::{RequestContext, UserInfo};
 use yh_filemanager_vfs_storage_hub::vfs::traits::VfsStorage;
 use yh_response::{AppError, Resp};
 use yh_system::config::get_system_config;
+
+const PLUGIN_RUNTIME_CLIENT_ID: &str = "plugin-runtime";
 
 #[derive(Clone)]
 pub struct HostApiState {
@@ -288,6 +293,99 @@ pub struct HostPluginConfigEnsureResponse {
     pub plugin_id: String,
     pub config_dir: String,
     pub config_file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNotificationSendRequest {
+    pub title: String,
+    pub content: String,
+    pub msg_type: String,
+    pub level: String,
+    pub recipient_ids: Vec<String>,
+    pub extra_data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostNotificationSendResponse {
+    pub notification_id: String,
+}
+
+fn request_context_from_request(req: &Request) -> RequestContext {
+    req.extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn is_plugin_runtime_request(ctx: &RequestContext) -> bool {
+    ctx.client_id.as_deref() == Some(PLUGIN_RUNTIME_CLIENT_ID)
+}
+
+fn require_plugin_or_user(ctx: &RequestContext) -> Result<(), AppError> {
+    if is_plugin_runtime_request(ctx) || ctx.user_info.is_some() {
+        return Ok(());
+    }
+    Err(AppError::unauthorized(
+        "plugin host API requires plugin runtime auth or authenticated user context",
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+    ))
+}
+
+fn header_string(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn forwarded_user_from_headers(headers: &axum::http::HeaderMap) -> Option<UserInfo> {
+    let user_id = header_string(headers, "X-Plugin-User-ID")?;
+    let role_id = header_string(headers, "X-Plugin-User-Role")
+        .and_then(|value| value.parse::<i16>().ok())?;
+    let username = header_string(headers, "X-Plugin-User-Name").map(Arc::<str>::from);
+    Some(UserInfo {
+        user_id: Arc::<str>::from(user_id),
+        username,
+        role_id,
+        session_id: None,
+        status: None,
+    })
+}
+
+pub async fn plugin_host_auth_middleware(
+    mut req: Request,
+    next: Next,
+) -> Result<Response, Response> {
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if let Some(token) = auth_header
+        && let Some(manager) = crate::manager::get_plugin_runtime_manager()
+        && token == manager.host_api_secret_base64()
+    {
+        let mut ctx = request_context_from_request(&req);
+        ctx.client_id = Some(Arc::<str>::from(PLUGIN_RUNTIME_CLIENT_ID));
+        ctx.token = Some(Arc::<str>::from(token));
+        ctx.user_id = None;
+        ctx.user_info = None;
+        if let Some(user_info) = forwarded_user_from_headers(req.headers()) {
+            ctx.user_id = Some(Arc::clone(&user_info.user_id));
+            ctx.user_info = Some(user_info);
+        }
+        req.extensions_mut().insert(ctx);
+        return Ok(next.run(req).await);
+    }
+
+    yh_api_middlewares::jwt_auth::jwt_auth_middleware(req, next).await
 }
 
 fn require_user(ctx: &RequestContext) -> Result<(&str, i16, Option<&str>), AppError> {
@@ -871,7 +969,7 @@ pub async fn upsert_migration_state(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostMigrationStateUpsertRequest>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
     let migration_key =
@@ -932,7 +1030,7 @@ pub async fn get_migration_state(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Query(query): Query<HostMigrationStateQuery>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
     let migration_key =
@@ -978,7 +1076,7 @@ pub async fn list_migration_states(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Query(query): Query<HostMigrationStateListQuery>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
     let states = crate::entities::plugin_migration_state::Entity::find()
@@ -1013,7 +1111,7 @@ pub async fn execute_migration(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostMigrationExecuteRequest>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
     let migration_key =
@@ -1099,7 +1197,7 @@ pub async fn upsert_task(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostTaskUpsertRequest>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let task_key = validate_host_plugin_identifier(&payload.task_key, "task_key", &ctx)?;
     let existing = crate::entities::plugin_task::Entity::find()
@@ -1157,7 +1255,7 @@ pub async fn list_tasks(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Query(query): Query<HostTaskListQuery>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let tasks = crate::entities::plugin_task::Entity::find()
         .filter(crate::entities::plugin_task::Column::PluginId.eq(plugin_id.as_str()))
@@ -1188,7 +1286,7 @@ pub async fn upsert_nav_item(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostNavItemUpsertRequest>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let item_key = validate_host_plugin_identifier(&payload.item_key, "item_key", &ctx)?;
     let existing = crate::entities::plugin_nav_item::Entity::find()
@@ -1258,7 +1356,7 @@ pub async fn list_nav_items(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Query(query): Query<HostNavItemListQuery>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let mut select = crate::entities::plugin_nav_item::Entity::find();
     if let Some(plugin_id) = query.plugin_id.as_deref() {
         let plugin_id = validate_host_plugin_identifier(plugin_id, "plugin_id", &ctx)?;
@@ -1296,7 +1394,7 @@ pub async fn ensure_plugin_config_file(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostPluginConfigEnsureRequest>,
 ) -> Result<Json<Resp>, AppError> {
-    let _ = require_user(&ctx)?;
+    require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let (config_dir, config_file) = ensure_plugin_config_path(&plugin_id, &payload.file_name)
         .await
@@ -1321,6 +1419,61 @@ pub async fn ensure_plugin_config_file(
             plugin_id,
             config_dir: config_dir.to_string_lossy().to_string(),
             config_file: config_file.to_string_lossy().to_string(),
+        })
+        .map_err(|e| internal_error(&ctx, e.to_string()))?,
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/notifications/send", tag = "Plugins V2")]
+pub async fn send_notification(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostNotificationSendRequest>,
+) -> Result<Json<Resp>, AppError> {
+    require_plugin_or_user(&ctx)?;
+
+    let recipient_ids = payload
+        .recipient_ids
+        .iter()
+        .filter_map(|value| uuid::Uuid::parse_str(value).ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    if recipient_ids.is_empty() {
+        return Err(AppError::new(
+            yh_response::error::ErrorCode::BadRequest,
+            "notification recipient_ids must contain at least one valid user id",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        ));
+    }
+
+    let sender_id = ctx
+        .user_id
+        .as_deref()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+    let notification_id = yh_internal_notify::InternalNotifyService::send_notification(
+        state.db.as_ref(),
+        yh_internal_notify::NotifyPayload {
+            title: payload.title,
+            content: payload.content,
+            msg_type: payload.msg_type,
+            level: payload.level,
+            sender_id,
+            recipient_ids,
+            extra_data: payload.extra_data,
+            expired_at: None,
+        },
+    )
+    .await
+    .map_err(|e| internal_error(&ctx, format!("failed to create notification: {}", e)))?;
+
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::to_value(HostNotificationSendResponse {
+            notification_id: notification_id.to_string(),
         })
         .map_err(|e| internal_error(&ctx, e.to_string()))?,
     )))
@@ -1352,5 +1505,6 @@ pub fn create_host_api_router(db: Arc<DatabaseConnection>) -> Router {
         .route("/nav/upsert", post(upsert_nav_item))
         .route("/nav/list", get(list_nav_items))
         .route("/config/ensure", post(ensure_plugin_config_file))
+        .route("/notifications/send", post(send_notification))
         .with_state(HostApiState { db })
 }

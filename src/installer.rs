@@ -53,7 +53,7 @@ fn safe_join(base: &Path, name: &str) -> Result<PathBuf, String> {
 
 pub fn read_manifest_from_zip_bytes(zip_bytes: &[u8]) -> Result<PluginManifest, String> {
     let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin zip: {}", e))?;
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
     let mut manifest_file = archive
         .by_name("plugin.json")
         .map_err(|e| format!("plugin.json is required: {}", e))?;
@@ -98,7 +98,7 @@ fn extract_plugin_zip_to_dir_blocking(zip_bytes: &[u8], target_dir: &Path) -> Re
         )
     })?;
     let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin zip: {}", e))?;
+    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
 
     for index in 0..archive.len() {
         let mut entry = archive
@@ -135,6 +135,26 @@ fn extract_plugin_zip_to_dir_blocking(zip_bytes: &[u8], target_dir: &Path) -> Re
                 e
             )
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut mode = entry.unix_mode().unwrap_or(0o644);
+            if out_path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                == Some("runtime")
+                && (out_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| !name.ends_with(".wasm"))
+                    .unwrap_or(false))
+            {
+                mode |= 0o755;
+            }
+            let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        }
     }
 
     Ok(())
@@ -194,7 +214,7 @@ pub async fn install_plugin_from_zip_bytes(
     if let Some(expected) = &manifest.checksum_sha256
         && expected != &checksum_sha256
     {
-        return Err("plugin zip checksum does not match manifest checksum_sha256".to_string());
+        return Err("plugin package checksum does not match manifest checksum_sha256".to_string());
     }
 
     let package_dir = packages_root.join(&manifest.id).join(&manifest.version);
@@ -306,12 +326,12 @@ pub async fn install_plugin_from_zip_bytes(
 pub async fn read_plugin_zip_from_path(path: &Path) -> Result<Vec<u8>, String> {
     tokio::fs::read(path)
         .await
-        .map_err(|e| format!("failed to read plugin zip '{}': {}", path.display(), e))
+        .map_err(|e| format!("failed to read plugin package '{}': {}", path.display(), e))
 }
 
 pub fn read_plugin_zip_from_file(file: &mut File) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read plugin zip file: {}", e))?;
+        .map_err(|e| format!("failed to read plugin package file: {}", e))?;
     Ok(bytes)
 }

@@ -80,6 +80,7 @@ pub struct WasmRuntimeManifest {
     pub component: Option<bool>,
     pub args: Option<Vec<String>>,
     pub env: Option<BTreeMap<String, String>>,
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

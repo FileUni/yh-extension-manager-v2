@@ -4,7 +4,7 @@ version = "0.1.10-alpha.3"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.8.8", features = ["multipart"] }
+axum = { version = "0.8.8", features = ["multipart", "ws"] }
 base64 = "0.22.1"
 bytes = "1.11.0"
 chrono = { version = "0.4.43", features = ["serde"] }
@@ -31,6 +31,7 @@ yh-console-log = { path = "../yh-console-log" }
 yh-external-process-manager = { path = "../yh-external-process-manager" }
 yh-fast-kv-storage-hub = { path = "../yh-fast-kv-storage-hub" }
 yh-filemanager-vfs-storage-hub = { path = "../yh-filemanager-vfs-storage-hub" }
+yh-internal-notify = { path = "../yh-internal-notify" }
 yh-response = { path = "../yh-response" }
 yh-system = { path = "../yh-system" }
 yh-user-center = { path = "../yh-user-center" }

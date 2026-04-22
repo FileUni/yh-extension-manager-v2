@@ -25,6 +25,11 @@ pub fn create_router(db: Arc<DatabaseConnection>) -> Router {
             "/{plugin_id}/permissions",
             axum::routing::post(handlers::update_permission_grants),
         )
+        .route("/{plugin_id}/config", get(handlers::get_plugin_config))
+        .route(
+            "/{plugin_id}/config",
+            axum::routing::post(handlers::update_plugin_config),
+        )
         .route("/{plugin_id}/tasks", get(handlers::list_plugin_tasks))
         .route(
             "/{plugin_id}/nav-items",
@@ -60,5 +65,5 @@ pub fn create_router(db: Arc<DatabaseConnection>) -> Router {
 
 pub fn create_host_router(db: Arc<DatabaseConnection>) -> Router {
     crate::host_api::create_host_api_router(db)
-        .layer(from_fn(yh_api_middlewares::jwt_auth::jwt_auth_middleware))
+        .layer(from_fn(crate::host_api::plugin_host_auth_middleware))
 }

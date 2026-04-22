@@ -61,6 +61,19 @@ pub struct MarketInstallFromUrlRequest {
     pub download_url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct PluginConfigResponse {
+    pub plugin_id: String,
+    pub config_dir: String,
+    pub config_file: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct UpdatePluginConfigRequest {
+    pub content: String,
+}
+
 fn sanitize_fs_component(value: &str) -> String {
     value
         .chars()
@@ -72,6 +85,54 @@ fn sanitize_fs_component(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn default_nav_icon(plugin_id: &str) -> &'static str {
+    if plugin_id.contains("chat") {
+        "MessageSquare"
+    } else if plugin_id.contains("email") {
+        "Mail"
+    } else if plugin_id.contains("todo") {
+        "ListTodo"
+    } else {
+        "PlugZap"
+    }
+}
+
+fn default_nav_position(plugin_id: &str) -> &'static str {
+    let _ = plugin_id;
+    "sidebar"
+}
+
+async fn ensure_default_nav_item(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    manifest: &crate::manifest::PluginManifest,
+) {
+    let Some(ui) = &manifest.ui else {
+        return;
+    };
+    let route = ui
+        .mount_path
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "/".to_string());
+    let _ = registry::upsert_plugin_nav_item(
+        db,
+        registry::UpsertNavItemInput {
+            plugin_id: plugin_id.to_string(),
+            item_key: "main".to_string(),
+            label: manifest.name.clone(),
+            route,
+            icon: default_nav_icon(plugin_id).to_string(),
+            visibility: "user".to_string(),
+            group_key: Some("plugins".to_string()),
+            position: Some(default_nav_position(plugin_id).to_string()),
+            required_permission: None,
+            sort_order: 100,
+        },
+    )
+    .await;
 }
 
 fn map_db_error(ctx: &RequestContext, message: &str, error: sea_orm::DbErr) -> AppError {
@@ -212,7 +273,7 @@ pub async fn install_plugin_zip(
         .map_err(|e| {
             AppError::new(
                 ErrorCode::BadRequest,
-                format!("Failed to read plugin zip request body: {}", e),
+                format!("Failed to read plugin package request body: {}", e),
                 ctx.request_id.to_owned(),
                 ctx.client_ip.to_owned(),
             )
@@ -220,7 +281,7 @@ pub async fn install_plugin_zip(
     if body.is_empty() {
         return Err(AppError::new(
             ErrorCode::BadRequest,
-            "Request body must contain plugin zip bytes",
+            "Request body must contain plugin package bytes",
             ctx.request_id.to_owned(),
             ctx.client_ip.to_owned(),
         ));
@@ -378,6 +439,94 @@ pub async fn list_plugin_nav_items(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/admin/plugins/{plugin_id}/config",
+    params(("plugin_id" = String, Path, description = "Plugin ID")),
+    responses((status = 200, description = "Get plugin config file", body = PluginConfigResponse)),
+    security(("jwt" = [])),
+    tag = "Plugins V2"
+)]
+pub async fn get_plugin_config(
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+) -> Result<impl IntoResponse, AppError> {
+    let manager = get_plugin_runtime_manager().ok_or_else(|| {
+        AppError::internal(
+            "plugin runtime manager is not initialized",
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    let (config_dir, config_file) = manager
+        .ensure_plugin_config_paths(&plugin_id)
+        .await
+        .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+    let content = tokio::fs::read_to_string(&config_file)
+        .await
+        .unwrap_or_else(|_| String::new());
+    let data = serde_json::to_value(PluginConfigResponse {
+        plugin_id,
+        config_dir,
+        config_file,
+        content,
+    })
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/plugins/{plugin_id}/config",
+    params(("plugin_id" = String, Path, description = "Plugin ID")),
+    request_body = UpdatePluginConfigRequest,
+    responses((status = 200, description = "Update plugin config file", body = PluginConfigResponse)),
+    security(("jwt" = [])),
+    tag = "Plugins V2"
+)]
+pub async fn update_plugin_config(
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<UpdatePluginConfigRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let manager = get_plugin_runtime_manager().ok_or_else(|| {
+        AppError::internal(
+            "plugin runtime manager is not initialized",
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    let (config_dir, config_file) = manager
+        .ensure_plugin_config_paths(&plugin_id)
+        .await
+        .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+    tokio::fs::write(&config_file, payload.content.as_bytes())
+        .await
+        .map_err(|e| AppError::internal(format!("failed to write plugin config: {}", e), ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+    let data = serde_json::to_value(PluginConfigResponse {
+        plugin_id,
+        config_dir,
+        config_file,
+        content: payload.content,
+    })
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v1/admin/plugins/{plugin_id}/start",
     params(("plugin_id" = String, Path, description = "Plugin ID")),
@@ -507,6 +656,7 @@ pub async fn start_plugin_runtime(
         }
     };
     manager.set_runtime_handle(&plugin_id, handle.clone());
+    ensure_default_nav_item(state.db.as_ref(), &plugin_id, &manifest).await;
     let _ =
         registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, "running").await;
     let _ = registry::append_audit_log(
@@ -742,9 +892,29 @@ pub async fn uninstall_plugin(
         }
     }
 
-    let _ = permissions::delete_plugin_permission_grants(state.db.as_ref(), &plugin_id).await;
+    if let Some(manager) = get_plugin_runtime_manager() {
+        let layout = manager.status_snapshot().layout;
+        let plugin_component = sanitize_fs_component(&plugin_id);
+        for dir in [
+            PathBuf::from(layout.packages_dir).join(&plugin_component),
+            PathBuf::from(layout.config_dir).join(&plugin_component),
+            PathBuf::from(layout.state_dir).join(&plugin_component),
+            PathBuf::from(layout.logs_dir).join(&plugin_component),
+            PathBuf::from(layout.runtime_dir).join(&plugin_component),
+        ] {
+            if tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
+        }
+    }
+
+    let _ = registry::delete_plugin_permission_grants_all(state.db.as_ref(), &plugin_id).await;
     let _ = registry::delete_plugin_versions(state.db.as_ref(), &plugin_id).await;
-    let _ = registry::mark_plugin_uninstalled(state.db.as_ref(), &plugin_id).await;
+    let _ = registry::delete_plugin_tasks(state.db.as_ref(), &plugin_id).await;
+    let _ = registry::delete_plugin_nav_items(state.db.as_ref(), &plugin_id).await;
+    let _ = registry::delete_plugin_shared_records(state.db.as_ref(), &plugin_id).await;
+    let _ = registry::delete_plugin_migration_states(state.db.as_ref(), &plugin_id).await;
+    let _ = registry::delete_plugin_registry(state.db.as_ref(), &plugin_id).await;
     let _ = registry::append_audit_log(
         state.db.as_ref(),
         &plugin_id,

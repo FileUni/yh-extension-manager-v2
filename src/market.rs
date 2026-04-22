@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use utoipa::ToSchema;
 
 pub const DEFAULT_PLUGIN_MARKET_BASE_URL: &str = "https://www.fileuni.com/api/plugins";
+pub const DEFAULT_PLUGIN_PACKAGE_SUFFIX: &str = ".zip.fupkg";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct MarketInstallFromUrlRequest {
@@ -56,21 +57,27 @@ pub async fn install_from_download_url(
     packages_root: &std::path::Path,
     request: MarketInstallFromUrlRequest,
 ) -> Result<serde_json::Value, String> {
+    if !request.download_url.ends_with(DEFAULT_PLUGIN_PACKAGE_SUFFIX) {
+        return Err(format!(
+            "plugin package download URL must end with {}",
+            DEFAULT_PLUGIN_PACKAGE_SUFFIX
+        ));
+    }
     let response = reqwest::Client::new()
         .get(&request.download_url)
         .send()
         .await
-        .map_err(|e| format!("failed to download plugin zip: {}", e))?;
+        .map_err(|e| format!("failed to download plugin package: {}", e))?;
     if !response.status().is_success() {
         return Err(format!(
-            "plugin zip download failed with status {}",
+            "plugin package download failed with status {}",
             response.status()
         ));
     }
     let bytes = response
         .bytes()
         .await
-        .map_err(|e| format!("failed to read plugin zip response body: {}", e))?;
+        .map_err(|e| format!("failed to read plugin package response body: {}", e))?;
     let result = install_plugin_from_zip_bytes(
         db,
         packages_root,
