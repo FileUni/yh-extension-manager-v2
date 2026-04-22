@@ -87,6 +87,39 @@ fn sanitize_fs_component(value: &str) -> String {
         .collect()
 }
 
+async fn stop_lingering_runtime_processes(runtime_dir: &std::path::Path) {
+    let runtime_dir_str = runtime_dir.to_string_lossy().to_string();
+    let status = tokio::process::Command::new("pkill")
+        .arg("-f")
+        .arg(&runtime_dir_str)
+        .status()
+        .await;
+    match status {
+        Ok(exit_status) if exit_status.success() => {}
+        Ok(exit_status) if exit_status.code() == Some(1) => {}
+        Ok(exit_status) => {
+            yh_console_log::yhlog(
+                "warn",
+                &format!(
+                    "failed to stop lingering plugin runtime processes under '{}': {}",
+                    runtime_dir.display(),
+                    exit_status
+                ),
+            );
+        }
+        Err(error) => {
+            yh_console_log::yhlog(
+                "warn",
+                &format!(
+                    "failed to invoke pkill for lingering plugin runtime processes under '{}': {}",
+                    runtime_dir.display(),
+                    error
+                ),
+            );
+        }
+    }
+}
+
 fn default_nav_icon(plugin_id: &str) -> &'static str {
     if plugin_id.contains("chat") {
         "MessageSquare"
@@ -788,6 +821,11 @@ pub async fn stop_plugin_runtime(
                     AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
                 })?
         }
+        "wasm-component" => crate::runtime::wasm::stop_wasm_runtime(&handle)
+            .await
+            .map_err(|e| {
+                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+            })?,
         "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
             .await
             .map_err(|e| {
@@ -847,6 +885,11 @@ pub async fn uninstall_plugin(
             .map_err(|e| {
                 AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
             })?,
+            "wasm-component" => crate::runtime::wasm::stop_wasm_runtime(&handle)
+                .await
+                .map_err(|e| {
+                    AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
+                })?,
             "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
                 .await
                 .map_err(|e| {
@@ -887,6 +930,7 @@ pub async fn uninstall_plugin(
                 .map_err(|e| map_db_error(&ctx, "Failed to load plugin version", e))?
     {
         let package_dir = PathBuf::from(version_row.package_path.clone());
+        stop_lingering_runtime_processes(&package_dir.join("runtime")).await;
         if tokio::fs::try_exists(&package_dir).await.unwrap_or(false) {
             let _ = tokio::fs::remove_dir_all(&package_dir).await;
         }
@@ -901,6 +945,7 @@ pub async fn uninstall_plugin(
             PathBuf::from(layout.state_dir).join(&plugin_component),
             PathBuf::from(layout.logs_dir).join(&plugin_component),
             PathBuf::from(layout.runtime_dir).join(&plugin_component),
+            PathBuf::from(layout.shared_dir).join(&plugin_component),
         ] {
             if tokio::fs::try_exists(&dir).await.unwrap_or(false) {
                 let _ = tokio::fs::remove_dir_all(&dir).await;

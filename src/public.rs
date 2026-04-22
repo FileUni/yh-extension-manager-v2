@@ -45,6 +45,55 @@ fn safe_join(base: &StdPath, name: &str) -> Result<PathBuf, AppError> {
     Ok(base.join(path))
 }
 
+fn should_forward_request_header(name: &axum::http::header::HeaderName) -> bool {
+    !matches!(
+        name.as_str(),
+        "authorization"
+            | "connection"
+            | "content-length"
+            | "host"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn is_html_like_path(value: &str) -> bool {
+    StdPath::new(value)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "html" | "htm"))
+}
+
+fn ui_entry_relative_path(ui_root: &str) -> String {
+    let trimmed = ui_root.trim_matches('/');
+    if trimmed.is_empty() {
+        return "index.html".to_string();
+    }
+    if is_html_like_path(trimmed) {
+        return trimmed.to_string();
+    }
+    format!("{}/index.html", trimmed.trim_end_matches('/'))
+}
+
+fn ui_requested_relative_path(ui_root: &str, path: &str) -> String {
+    let requested = path.trim_matches('/');
+    if requested.is_empty() {
+        return ui_entry_relative_path(ui_root);
+    }
+
+    let trimmed_root = ui_root.trim_matches('/');
+    if trimmed_root.is_empty() || is_html_like_path(trimmed_root) {
+        return requested.to_string();
+    }
+
+    format!("{}/{}", trimmed_root.trim_end_matches('/'), requested)
+}
+
 async fn load_package_root(
     db: &Arc<sea_orm::DatabaseConnection>,
     plugin_id: &str,
@@ -116,6 +165,35 @@ async fn active_route_base_url(plugin_id: &str, ctx: &RequestContext) -> Result<
     })
 }
 
+fn build_plugin_runtime_target_url(
+    base_url: &str,
+    prefix: &str,
+    path: &str,
+    query: &str,
+    ctx: &RequestContext,
+) -> Result<Url, AppError> {
+    let mut url = Url::parse(base_url)
+        .map_err(|e| internal_error(ctx, format!("invalid plugin base url: {}", e)))?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            internal_error(ctx, format!("plugin base url cannot be a base for routing: {}", base_url))
+        })?;
+        segments.pop_if_empty();
+        if !prefix.is_empty() {
+            segments.push(prefix);
+        }
+        for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+            segments.push(segment);
+        }
+    }
+    if query.is_empty() {
+        url.set_query(None);
+    } else {
+        url.set_query(Some(query));
+    }
+    Ok(url)
+}
+
 pub async fn serve_plugin_ui_root(
     axum::Extension(db): axum::Extension<Arc<sea_orm::DatabaseConnection>>,
     Path(plugin_id): Path<String>,
@@ -148,19 +226,17 @@ async fn serve_plugin_ui_file(
         ));
     };
     let root = install_root.join("ui");
-    let relative = if path.is_empty() {
-        ui.root.clone()
-    } else {
-        format!("{}/{}", ui.root.trim_end_matches('/'), path)
-    };
-    let candidate = safe_join(&root, &relative)?;
+    let entry_relative = ui_entry_relative_path(&ui.root);
+    let requested_relative = ui_requested_relative_path(&ui.root, &path);
+    let entry_file = safe_join(&root, &entry_relative)?;
+    let candidate = safe_join(&root, &requested_relative)?;
     let selected = if tokio::fs::try_exists(&candidate)
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to check ui asset: {}", e)))?
     {
         candidate
     } else {
-        root.join("index.html")
+        entry_file
     };
     let bytes = tokio::fs::read(&selected)
         .await
@@ -193,16 +269,13 @@ pub async fn proxy_plugin_api(
     let body = to_bytes(req.into_body(), usize::MAX)
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to read proxied request body: {}", e)))?;
-    let target = if query.is_empty() {
-        format!("{}/{}", base_url.trim_end_matches('/'), path)
-    } else {
-        format!("{}/{}?{}", base_url.trim_end_matches('/'), path, query)
-    };
-    let url = Url::parse(&target)
-        .map_err(|e| internal_error(&ctx, format!("invalid plugin api target url: {}", e)))?;
+    let url = build_plugin_runtime_target_url(&base_url, "api", &path, &query, &ctx)?;
     let client = reqwest::Client::new();
     let mut builder = client.request(method, url);
     for (name, value) in &headers {
+        if !should_forward_request_header(name) {
+            continue;
+        }
         builder = builder.header(name, value);
     }
     if let Some(user_info) = &ctx.user_info {
@@ -259,27 +332,17 @@ async fn proxy_plugin_ws_inner(
     ctx: RequestContext,
 ) -> Result<Response, AppError> {
     let base_url = active_route_base_url(&plugin_id, &ctx).await?;
-    let protocol = if base_url.starts_with("https://") || base_url.starts_with("wss://") {
-        "wss://"
-    } else {
-        "ws://"
-    };
-    let authority = base_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_start_matches("ws://")
-        .trim_start_matches("wss://")
-        .trim_end_matches('/');
     let query = uri.query().unwrap_or("");
-    let target = if query.is_empty() {
-        format!("{}{}/{}", protocol, authority, path)
+    let mut target_url = build_plugin_runtime_target_url(&base_url, "ws", &path, query, &ctx)?;
+    let ws_scheme = if target_url.scheme() == "https" || target_url.scheme() == "wss" {
+        "wss"
     } else {
-        format!("{}{}/{}?{}", protocol, authority, path, query)
+        "ws"
     };
-    let target_url = Url::parse(&target).map_err(|e| {
+    target_url.set_scheme(ws_scheme).map_err(|_| {
         AppError::new(
             ErrorCode::BadRequest,
-            format!("invalid plugin websocket target: {}", e),
+            "invalid plugin websocket target scheme",
             ctx.request_id.to_owned(),
             ctx.client_ip.to_owned(),
         )
