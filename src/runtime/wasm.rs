@@ -3,6 +3,19 @@ use crate::runtime::{RuntimeHandle, RuntimeStatus};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+struct WasmRuntimeLaunchContext<'a> {
+    runner: &'a str,
+    install_root: &'a Path,
+    artifact: &'a Path,
+    runtime: &'a WasmRuntimeManifest,
+    plugin_id: &'a str,
+    host_api_base_url: &'a str,
+    host_api_token: &'a str,
+    plugin_config_dir: &'a str,
+    plugin_config_file: &'a str,
+    is_component: bool,
+}
+
 pub fn prepare_wasm_runtime(
     plugin_id: &str,
     install_root: &Path,
@@ -45,18 +58,18 @@ pub async fn start_wasm_module_runtime(
     }
 
     let runner = std::env::var("FILEUNI_WASM_RUNNER").unwrap_or_else(|_| "wasmtime".to_string());
-    let (pid, instance_ref, detail) = spawn_wasm_or_dev_fallback(
-        &runner,
+    let (pid, instance_ref, detail) = spawn_wasm_or_dev_fallback(WasmRuntimeLaunchContext {
+        runner: &runner,
         install_root,
-        &artifact,
+        artifact: &artifact,
         runtime,
         plugin_id,
         host_api_base_url,
         host_api_token,
         plugin_config_dir,
         plugin_config_file,
-        false,
-    )
+        is_component: false,
+    })
     .await?;
 
     Ok(RuntimeHandle {
@@ -90,18 +103,18 @@ pub async fn start_wasm_component_runtime(
     let runner = std::env::var("FILEUNI_WASM_COMPONENT_RUNNER").unwrap_or_else(|_| {
         std::env::var("FILEUNI_WASM_RUNNER").unwrap_or_else(|_| "wasmtime".to_string())
     });
-    let (pid, instance_ref, detail) = spawn_wasm_or_dev_fallback(
-        &runner,
+    let (pid, instance_ref, detail) = spawn_wasm_or_dev_fallback(WasmRuntimeLaunchContext {
+        runner: &runner,
         install_root,
-        &artifact,
+        artifact: &artifact,
         runtime,
         plugin_id,
         host_api_base_url,
         host_api_token,
         plugin_config_dir,
         plugin_config_file,
-        true,
-    )
+        is_component: true,
+    })
     .await?;
 
     Ok(RuntimeHandle {
@@ -131,71 +144,87 @@ pub async fn stop_wasm_runtime(handle: &RuntimeHandle) -> Result<(), String> {
 }
 
 async fn spawn_wasm_or_dev_fallback(
-    runner: &str,
-    install_root: &Path,
-    artifact: &Path,
-    runtime: &WasmRuntimeManifest,
-    plugin_id: &str,
-    host_api_base_url: &str,
-    host_api_token: &str,
-    plugin_config_dir: &str,
-    plugin_config_file: &str,
-    is_component: bool,
+    launch: WasmRuntimeLaunchContext<'_>,
 ) -> Result<(u32, String, String), String> {
-    let mut command = Command::new(runner);
-    if is_component {
+    let mut command = Command::new(launch.runner);
+    if launch.is_component {
         command.arg("run");
     }
-    command.arg(artifact);
-    if let Some(args) = &runtime.args {
+    command.arg(launch.artifact);
+    if let Some(args) = &launch.runtime.args {
         command.args(args);
     }
-    if let Some(env) = &runtime.env {
+    if let Some(env) = &launch.runtime.env {
         command.envs(env);
     }
-    command.env("FILEUNI_PLUGIN_ID", plugin_id);
-    command.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", host_api_base_url);
-    command.env("FILEUNI_PLUGIN_HOST_API_TOKEN", host_api_token);
-    command.env("FILEUNI_PLUGIN_CONFIG_DIR", plugin_config_dir);
-    command.env("FILEUNI_PLUGIN_CONFIG_FILE", plugin_config_file);
+    command.env("FILEUNI_PLUGIN_ID", launch.plugin_id);
+    command.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", launch.host_api_base_url);
+    command.env("FILEUNI_PLUGIN_HOST_API_TOKEN", launch.host_api_token);
+    command.env("FILEUNI_PLUGIN_CONFIG_DIR", launch.plugin_config_dir);
+    command.env("FILEUNI_PLUGIN_CONFIG_FILE", launch.plugin_config_file);
     match command.spawn() {
         Ok(child) => {
-            let pid = child.id().ok_or_else(|| format!("runner '{}' did not provide pid", runner))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| format!("runner '{}' did not provide pid", launch.runner))?;
             drop(child);
-            return Ok((pid, runner.to_string(), artifact.to_string_lossy().to_string()));
+            return Ok((
+                pid,
+                launch.runner.to_string(),
+                launch.artifact.to_string_lossy().to_string(),
+            ));
         }
         Err(error) => {
             if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("failed to spawn wasm runner '{}': {}", runner, error));
+                return Err(format!(
+                    "failed to spawn wasm runner '{}': {}",
+                    launch.runner, error
+                ));
             }
         }
     }
 
-    let stem = artifact
+    let stem = launch
+        .artifact
         .file_stem()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "failed to derive wasm artifact stem".to_string())?;
-    let dev_server = PathBuf::from(install_root).join("runtime").join(format!("{}-dev-server", stem));
+    let dev_server = PathBuf::from(launch.install_root)
+        .join("runtime")
+        .join(format!("{}-dev-server", stem));
     if !dev_server.exists() {
         return Err(format!(
             "failed to spawn wasm runner '{}' and no development fallback binary was found at {}",
-            runner,
+            launch.runner,
             dev_server.display()
         ));
     }
     let mut fallback = Command::new(&dev_server);
-    if let Some(env) = &runtime.env {
+    if let Some(env) = &launch.runtime.env {
         fallback.envs(env);
     }
-    fallback.env("FILEUNI_PLUGIN_ID", plugin_id);
-    fallback.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", host_api_base_url);
-    fallback.env("FILEUNI_PLUGIN_HOST_API_TOKEN", host_api_token);
-    fallback.env("FILEUNI_PLUGIN_CONFIG_DIR", plugin_config_dir);
-    fallback.env("FILEUNI_PLUGIN_CONFIG_FILE", plugin_config_file);
-    let child = fallback
-        .spawn()
-        .map_err(|e| format!("failed to spawn development fallback '{}': {}", dev_server.display(), e))?;
-    let pid = child.id().ok_or_else(|| format!("development fallback '{}' did not provide pid", dev_server.display()))?;
+    fallback.env("FILEUNI_PLUGIN_ID", launch.plugin_id);
+    fallback.env("FILEUNI_PLUGIN_HOST_API_BASE_URL", launch.host_api_base_url);
+    fallback.env("FILEUNI_PLUGIN_HOST_API_TOKEN", launch.host_api_token);
+    fallback.env("FILEUNI_PLUGIN_CONFIG_DIR", launch.plugin_config_dir);
+    fallback.env("FILEUNI_PLUGIN_CONFIG_FILE", launch.plugin_config_file);
+    let child = fallback.spawn().map_err(|e| {
+        format!(
+            "failed to spawn development fallback '{}': {}",
+            dev_server.display(),
+            e
+        )
+    })?;
+    let pid = child.id().ok_or_else(|| {
+        format!(
+            "development fallback '{}' did not provide pid",
+            dev_server.display()
+        )
+    })?;
     drop(child);
-    Ok((pid, format!("{} (dev-fallback)", runner), dev_server.to_string_lossy().to_string()))
+    Ok((
+        pid,
+        format!("{} (dev-fallback)", launch.runner),
+        dev_server.to_string_lossy().to_string(),
+    ))
 }

@@ -91,7 +91,7 @@ pub async fn mark_plugin_uninstalled(
     active.current_version = Set(None);
     active.install_status = Set("uninstalled".to_string());
     active.enabled = Set(false);
-    active.updated_at = Set(chrono::Utc::now().into());
+    active.updated_at = Set(chrono::Utc::now());
     active.update(db).await.map(Some)
 }
 
@@ -110,7 +110,7 @@ pub async fn update_plugin_runtime_state(
     let mut active: plugin_registry::ActiveModel = existing.into();
     active.enabled = Set(enabled);
     active.install_status = Set(install_status.to_string());
-    active.updated_at = Set(chrono::Utc::now().into());
+    active.updated_at = Set(chrono::Utc::now());
     active.update(db).await.map(Some)
 }
 
@@ -138,7 +138,7 @@ pub async fn append_audit_log(
         action: Set(action.to_string()),
         message: Set(message),
         actor_user_id: Set(actor_user_id),
-        created_at: Set(chrono::Utc::now().into()),
+        created_at: Set(chrono::Utc::now()),
     }
     .insert(db)
     .await
@@ -199,7 +199,7 @@ pub async fn upsert_plugin_nav_item(
         active.position = Set(input.position);
         active.required_permission = Set(input.required_permission);
         active.sort_order = Set(input.sort_order);
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         return active.update(db).await;
     }
     plugin_nav_item::ActiveModel {
@@ -214,8 +214,8 @@ pub async fn upsert_plugin_nav_item(
         position: Set(input.position),
         required_permission: Set(input.required_permission),
         sort_order: Set(input.sort_order),
-        created_at: Set(now.into()),
-        updated_at: Set(now.into()),
+        created_at: Set(now),
+        updated_at: Set(now),
     }
     .insert(db)
     .await

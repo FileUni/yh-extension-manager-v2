@@ -1,6 +1,15 @@
 use crate::manifest::DockerRuntimeManifest;
 use crate::runtime::{RuntimeHandle, RuntimeStatus};
+use std::path::Path;
 use tokio::process::Command;
+
+pub struct DockerRuntimeLaunchContext<'a> {
+    pub docker_engine_command: &'a str,
+    pub host_api_base_url: &'a str,
+    pub host_api_token: &'a str,
+    pub plugin_config_dir: &'a str,
+    pub plugin_config_file: &'a str,
+}
 
 pub fn prepare_docker_runtime(
     plugin_id: &str,
@@ -31,17 +40,13 @@ pub fn prepare_docker_runtime(
 
 pub async fn start_docker_runtime(
     plugin_id: &str,
-    install_root: &std::path::Path,
+    install_root: &Path,
     runtime: &DockerRuntimeManifest,
-    docker_engine_command: &str,
-    host_api_base_url: &str,
-    host_api_token: &str,
-    plugin_config_dir: &str,
-    plugin_config_file: &str,
+    launch: &DockerRuntimeLaunchContext<'_>,
 ) -> Result<RuntimeHandle, String> {
     let instance_name = format!("fileuni-plg-{}", plugin_id.replace('.', "-"));
     if let Some(archive) = &runtime.oci_archive {
-        let status = Command::new(docker_engine_command)
+        let status = Command::new(launch.docker_engine_command)
             .args(["load", "-i"])
             .arg(install_root.join(archive))
             .status()
@@ -52,7 +57,7 @@ pub async fn start_docker_runtime(
         }
     }
     if let Some(compose_file) = &runtime.compose_file {
-        let status = Command::new(docker_engine_command)
+        let status = Command::new(launch.docker_engine_command)
             .args(["compose", "-f"])
             .arg(install_root.join(compose_file))
             .args(["up", "-d"])
@@ -66,10 +71,7 @@ pub async fn start_docker_runtime(
             plugin_id: plugin_id.to_string(),
             runtime_kind: "docker".to_string(),
             status: RuntimeStatus::Running,
-            detail: install_root
-                .join(compose_file)
-                .to_string_lossy()
-                .to_string(),
+            detail: install_root.join(compose_file).to_string_lossy().to_string(),
             pid: None,
             instance_ref: Some(instance_name),
             route_base_url: runtime.base_url.clone(),
@@ -80,7 +82,7 @@ pub async fn start_docker_runtime(
         .image
         .as_ref()
         .ok_or_else(|| "docker image is required for docker run mode".to_string())?;
-    let mut command = Command::new(docker_engine_command);
+    let mut command = Command::new(launch.docker_engine_command);
     command.args(["run", "-d", "--rm", "--name", &instance_name]);
     if let Some(ports) = &runtime.ports {
         for port in ports {
@@ -111,19 +113,18 @@ pub async fn start_docker_runtime(
     command
         .arg("-e")
         .arg(format!("FILEUNI_PLUGIN_ID={}", plugin_id));
-    command.arg("-e").arg(format!(
-        "FILEUNI_PLUGIN_HOST_API_BASE_URL={}",
-        host_api_base_url
-    ));
     command
         .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_HOST_API_TOKEN={}", host_api_token));
+        .arg(format!("FILEUNI_PLUGIN_HOST_API_BASE_URL={}", launch.host_api_base_url));
     command
         .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_CONFIG_DIR={}", plugin_config_dir));
+        .arg(format!("FILEUNI_PLUGIN_HOST_API_TOKEN={}", launch.host_api_token));
     command
         .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_CONFIG_FILE={}", plugin_config_file));
+        .arg(format!("FILEUNI_PLUGIN_CONFIG_DIR={}", launch.plugin_config_dir));
+    command
+        .arg("-e")
+        .arg(format!("FILEUNI_PLUGIN_CONFIG_FILE={}", launch.plugin_config_file));
     command.arg(image);
     if let Some(cmd) = &runtime.command {
         command.args(cmd);

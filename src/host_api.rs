@@ -819,7 +819,7 @@ pub async fn upsert_shared_record(
     let model = if let Some(existing) = existing {
         let mut active: crate::entities::plugin_shared_record::ActiveModel = existing.into();
         active.payload_json = Set(payload.payload_json.clone());
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         active
             .update(state.db.as_ref())
             .await
@@ -832,8 +832,8 @@ pub async fn upsert_shared_record(
             record_key: Set(record_key.clone()),
             owner_user_id: Set(Some(user_id.to_string())),
             payload_json: Set(payload.payload_json.clone()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         }
         .insert(state.db.as_ref())
         .await
@@ -988,7 +988,7 @@ pub async fn upsert_migration_state(
     let model = if let Some(existing) = existing {
         let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
         active.state_json = Set(payload.state_json.clone());
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         active
             .update(state.db.as_ref())
             .await
@@ -1000,8 +1000,8 @@ pub async fn upsert_migration_state(
             scope: Set(scope.clone()),
             migration_key: Set(migration_key.clone()),
             state_json: Set(payload.state_json.clone()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         }
         .insert(state.db.as_ref())
         .await
@@ -1150,8 +1150,8 @@ pub async fn execute_migration(
         scope: Set(scope.clone()),
         migration_key: Set(migration_key.clone()),
         state_json: Set(state_json.clone()),
-        created_at: Set(chrono::Utc::now().into()),
-        updated_at: Set(chrono::Utc::now().into()),
+        created_at: Set(chrono::Utc::now()),
+        updated_at: Set(chrono::Utc::now()),
     };
     let existing = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
@@ -1167,7 +1167,7 @@ pub async fn execute_migration(
         if let Some(existing) = existing {
             let mut active: crate::entities::plugin_migration_state::ActiveModel = existing.into();
             active.state_json = Set(state_json.clone());
-            active.updated_at = Set(chrono::Utc::now().into());
+            active.updated_at = Set(chrono::Utc::now());
             active.update(state.db.as_ref()).await.map_err(|e| {
                 internal_error(&ctx, format!("failed to update migration state: {}", e))
             })?
@@ -1213,7 +1213,7 @@ pub async fn upsert_task(
         active.status = Set(payload.status.clone());
         active.cron = Set(payload.cron.clone());
         active.last_error = Set(payload.last_error.clone());
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         active
             .update(state.db.as_ref())
             .await
@@ -1227,8 +1227,8 @@ pub async fn upsert_task(
             status: Set(payload.status.clone()),
             cron: Set(payload.cron.clone()),
             last_error: Set(payload.last_error.clone()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         }
         .insert(state.db.as_ref())
         .await
@@ -1306,7 +1306,7 @@ pub async fn upsert_nav_item(
         active.position = Set(payload.position.clone());
         active.required_permission = Set(payload.required_permission.clone());
         active.sort_order = Set(payload.sort_order);
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         active
             .update(state.db.as_ref())
             .await
@@ -1324,8 +1324,8 @@ pub async fn upsert_nav_item(
             position: Set(payload.position.clone()),
             required_permission: Set(payload.required_permission.clone()),
             sort_order: Set(payload.sort_order),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         }
         .insert(state.db.as_ref())
         .await

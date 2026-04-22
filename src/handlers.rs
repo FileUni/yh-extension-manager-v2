@@ -646,11 +646,13 @@ pub async fn start_plugin_runtime(
                 &plugin_id,
                 &install_root,
                 runtime_manifest,
-                manager.docker_engine_command(),
-                &manager.status_snapshot().host_api_base_url,
-                &manager.host_api_secret_base64(),
-                &plugin_config_dir,
-                &plugin_config_file,
+                &crate::runtime::docker::DockerRuntimeLaunchContext {
+                    docker_engine_command: manager.docker_engine_command(),
+                    host_api_base_url: &manager.status_snapshot().host_api_base_url,
+                    host_api_token: &manager.host_api_secret_base64(),
+                    plugin_config_dir: &plugin_config_dir,
+                    plugin_config_file: &plugin_config_file,
+                },
             )
             .await
             .map_err(|e| {

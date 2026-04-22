@@ -251,7 +251,7 @@ pub async fn install_plugin_from_zip_bytes(
         active.current_version = Set(Some(manifest.version.clone()));
         active.install_status = Set("installed".to_string());
         active.market_origin = Set(options.market_origin.clone());
-        active.updated_at = Set(now.into());
+        active.updated_at = Set(now);
         active
             .update(db)
             .await
@@ -266,8 +266,8 @@ pub async fn install_plugin_from_zip_bytes(
             install_status: Set("installed".to_string()),
             enabled: Set(false),
             market_origin: Set(options.market_origin.clone()),
-            created_at: Set(now.into()),
-            updated_at: Set(now.into()),
+            created_at: Set(now),
+            updated_at: Set(now),
         };
         model
             .insert(db)
@@ -282,8 +282,8 @@ pub async fn install_plugin_from_zip_bytes(
         package_path: Set(package_dir.to_string_lossy().to_string()),
         checksum_sha256: Set(Some(checksum_sha256.clone())),
         install_status: Set("installed".to_string()),
-        installed_at: Set(Some(now.into())),
-        created_at: Set(now.into()),
+        installed_at: Set(Some(now)),
+        created_at: Set(now),
     };
     version_model
         .insert(db)
@@ -307,7 +307,7 @@ pub async fn install_plugin_from_zip_bytes(
             manifest.id, manifest.version
         )),
         actor_user_id: Set(options.actor_user_id),
-        created_at: Set(now.into()),
+        created_at: Set(now),
     };
     audit_model
         .insert(db)

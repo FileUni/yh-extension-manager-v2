@@ -3,7 +3,6 @@ use crate::manager::get_runtime_status_snapshot;
 use crate::registry::{self, RegistryStats};
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use utoipa::ToSchema;
 
 pub const DEFAULT_PLUGIN_MARKET_BASE_URL: &str = "https://www.fileuni.com/api/plugins";
@@ -96,7 +95,7 @@ pub async fn market_catalog_snapshot(
     db: &DatabaseConnection,
 ) -> Result<MarketCatalogResponse, sea_orm::DbErr> {
     let stats = registry::collect_stats(db).await?;
-    let runtime = get_runtime_status_snapshot().await.map_err(|e| {
+    get_runtime_status_snapshot().await.map_err(|e| {
         sea_orm::DbErr::Custom(format!("plugin runtime status snapshot failed: {}", e))
     })?;
     Ok(MarketCatalogResponse {

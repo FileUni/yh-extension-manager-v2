@@ -54,7 +54,7 @@ pub async fn replace_plugin_permission_grants(
         if let Some(existing) = existing {
             let mut active: crate::entities::plugin_permission_grant::ActiveModel = existing.into();
             active.granted = sea_orm::Set(grant.granted);
-            active.updated_at = sea_orm::Set(now.into());
+            active.updated_at = sea_orm::Set(now);
             active.update(db).await?;
         } else {
             let model = crate::entities::plugin_permission_grant::ActiveModel {
@@ -62,8 +62,8 @@ pub async fn replace_plugin_permission_grants(
                 plugin_id: sea_orm::Set(plugin_id.to_string()),
                 permission_key: sea_orm::Set(grant.permission_key.clone()),
                 granted: sea_orm::Set(grant.granted),
-                created_at: sea_orm::Set(now.into()),
-                updated_at: sea_orm::Set(now.into()),
+                created_at: sea_orm::Set(now),
+                updated_at: sea_orm::Set(now),
             };
             let _ = model.insert(db).await?;
         }
