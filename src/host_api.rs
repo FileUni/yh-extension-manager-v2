@@ -5,6 +5,7 @@ use axum::{
     response::Response,
     routing::{delete, get, post},
 };
+use base64::Engine;
 use bytes::Bytes;
 use sea_orm::DatabaseConnection;
 use sea_orm::{
@@ -79,6 +80,12 @@ pub struct HostKvNamespaceResponse {
 pub struct HostVfsWriteTextRequest {
     pub logical_path: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct HostVfsWriteBytesRequest {
+    pub logical_path: String,
+    pub content_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -716,6 +723,34 @@ pub async fn write_vfs_text(
             &payload.logical_path,
             Bytes::from(payload.content.into_bytes()),
         )
+        .await
+        .map_err(|e| internal_error(&ctx, format!("vfs write failed: {}", e)))?;
+    Ok(Json(Resp::ok(
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+        serde_json::json!({ "ok": true, "path": payload.logical_path }),
+    )))
+}
+
+#[utoipa::path(post, path = "/api/v1/plugin-host/vfs/write-bytes", tag = "Plugins V2")]
+pub async fn write_vfs_bytes(
+    State(state): State<HostApiState>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<HostVfsWriteBytesRequest>,
+) -> Result<Json<Resp>, AppError> {
+    let storage = create_user_scoped_engine(&state, &ctx).await?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.content_base64.as_bytes())
+        .map_err(|e| {
+            AppError::new(
+                yh_response::error::ErrorCode::BadRequest,
+                format!("invalid base64 content: {}", e),
+                Arc::clone(&ctx.request_id),
+                Arc::clone(&ctx.client_ip),
+            )
+        })?;
+    storage
+        .write(&payload.logical_path, Bytes::from(bytes))
         .await
         .map_err(|e| internal_error(&ctx, format!("vfs write failed: {}", e)))?;
     Ok(Json(Resp::ok(
@@ -1490,6 +1525,7 @@ pub fn create_host_api_router(db: Arc<DatabaseConnection>) -> Router {
         .route("/kv/{key}", delete(delete_kv))
         .route("/vfs/read-text", get(read_vfs_text))
         .route("/vfs/write-text", post(write_vfs_text))
+        .route("/vfs/write-bytes", post(write_vfs_bytes))
         .route("/db/info", get(get_db_info))
         .route("/db/sqlite/ensure", post(ensure_sqlite_database))
         .route("/db/shared/upsert", post(upsert_shared_record))

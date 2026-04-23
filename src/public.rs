@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
+use jsonwebtoken::{DecodingKey, Validation, decode};
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
@@ -48,8 +49,7 @@ fn safe_join(base: &StdPath, name: &str) -> Result<PathBuf, AppError> {
 fn should_forward_request_header(name: &axum::http::header::HeaderName) -> bool {
     !matches!(
         name.as_str(),
-        "authorization"
-            | "connection"
+        "connection"
             | "content-length"
             | "host"
             | "keep-alive"
@@ -60,6 +60,48 @@ fn should_forward_request_header(name: &axum::http::header::HeaderName) -> bool 
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+fn forwarded_user_from_request(
+    req: &Request,
+    ctx: &RequestContext,
+) -> Option<(String, i16, Option<String>)> {
+    if let Some(user_info) = &ctx.user_info {
+        return Some((
+            user_info.user_id.to_string(),
+            user_info.role_id,
+            user_info.username.as_ref().map(|value| value.to_string()),
+        ));
+    }
+
+    let config = req
+        .extensions()
+        .get::<Arc<yh_api_middlewares::jwt_auth::JwtConfig>>()?;
+    let header_name = config.jwt_header.as_ref();
+    let token_prefix = config.token_prefix.as_ref();
+    let auth_header = req.headers().get(header_name)?.to_str().ok()?;
+    if !auth_header.starts_with(token_prefix) {
+        return None;
+    }
+    let token = auth_header.strip_prefix(token_prefix)?.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let token_data = decode::<yh_api_middlewares::jwt_auth::Claims>(
+        token,
+        &DecodingKey::from_secret(&config.access_token_secret),
+        &Validation::new(jsonwebtoken::Algorithm::HS256),
+    )
+    .ok()?;
+    let claims = token_data.claims;
+    if claims.typ.as_ref() != "access" {
+        return None;
+    }
+    Some((
+        claims.sub.to_string(),
+        claims.role_id,
+        Some(claims.username.to_string()),
+    ))
 }
 
 fn is_html_like_path(value: &str) -> bool {
@@ -266,6 +308,7 @@ pub async fn proxy_plugin_api(
     let method = req.method().clone();
     let headers = req.headers().clone();
     let query = req.uri().query().unwrap_or("").to_string();
+    let forwarded_user = forwarded_user_from_request(&req, &ctx);
     let body = to_bytes(req.into_body(), usize::MAX)
         .await
         .map_err(|e| internal_error(&ctx, format!("failed to read proxied request body: {}", e)))?;
@@ -278,11 +321,18 @@ pub async fn proxy_plugin_api(
         }
         builder = builder.header(name, value);
     }
-    if let Some(user_info) = &ctx.user_info {
-        builder = builder.header("X-Plugin-User-ID", user_info.user_id.as_ref());
-        builder = builder.header("X-Plugin-User-Role", user_info.role_id.to_string());
-        if let Some(username) = &user_info.username {
-            builder = builder.header("X-Plugin-User-Name", username.as_ref());
+    if let Some(auth_header) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        builder = builder.header("X-Plugin-Authorization", auth_header);
+    }
+    if let Some((user_id, role_id, username)) = forwarded_user {
+        builder = builder.header("X-Plugin-User-ID", user_id);
+        builder = builder.header("X-Plugin-User-Role", role_id.to_string());
+        if let Some(username) = username {
+            builder = builder.header("X-Plugin-User-Name", username);
         }
     }
     let response = builder

@@ -11,6 +11,7 @@ chrono = { version = "0.4.43", features = ["serde"] }
 dashmap = "6.1.0"
 futures-util = "0.3.31"
 hex = "0.4.3"
+jsonwebtoken = "10.1.0"
 rand = "0.8.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots-no-provider"] }
 sea-orm = { version = "1.1.19", default-features = false, features = ["runtime-tokio", "sqlx-postgres", "sqlx-sqlite", "macros", "with-chrono"] }
