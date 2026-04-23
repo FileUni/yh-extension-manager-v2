@@ -218,7 +218,10 @@ fn build_plugin_runtime_target_url(
         .map_err(|e| internal_error(ctx, format!("invalid plugin base url: {}", e)))?;
     {
         let mut segments = url.path_segments_mut().map_err(|_| {
-            internal_error(ctx, format!("plugin base url cannot be a base for routing: {}", base_url))
+            internal_error(
+                ctx,
+                format!("plugin base url cannot be a base for routing: {}", base_url),
+            )
         })?;
         segments.pop_if_empty();
         if !prefix.is_empty() {

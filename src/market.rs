@@ -56,7 +56,10 @@ pub async fn install_from_download_url(
     packages_root: &std::path::Path,
     request: MarketInstallFromUrlRequest,
 ) -> Result<serde_json::Value, String> {
-    if !request.download_url.ends_with(DEFAULT_PLUGIN_PACKAGE_SUFFIX) {
+    if !request
+        .download_url
+        .ends_with(DEFAULT_PLUGIN_PACKAGE_SUFFIX)
+    {
         return Err(format!(
             "plugin package download URL must end with {}",
             DEFAULT_PLUGIN_PACKAGE_SUFFIX

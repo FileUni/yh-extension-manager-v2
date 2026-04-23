@@ -53,7 +53,8 @@ fn safe_join(base: &Path, name: &str) -> Result<PathBuf, String> {
 
 pub fn read_manifest_from_zip_bytes(zip_bytes: &[u8]) -> Result<PluginManifest, String> {
     let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
+    let mut archive =
+        ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
     let mut manifest_file = archive
         .by_name("plugin.json")
         .map_err(|e| format!("plugin.json is required: {}", e))?;
@@ -98,7 +99,8 @@ fn extract_plugin_zip_to_dir_blocking(zip_bytes: &[u8], target_dir: &Path) -> Re
         )
     })?;
     let reader = std::io::Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
+    let mut archive =
+        ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
 
     for index in 0..archive.len() {
         let mut entry = archive

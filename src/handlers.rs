@@ -541,7 +541,13 @@ pub async fn update_plugin_config(
         .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
     tokio::fs::write(&config_file, payload.content.as_bytes())
         .await
-        .map_err(|e| AppError::internal(format!("failed to write plugin config: {}", e), ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+        .map_err(|e| {
+            AppError::internal(
+                format!("failed to write plugin config: {}", e),
+                ctx.request_id.to_owned(),
+                ctx.client_ip.to_owned(),
+            )
+        })?;
     let data = serde_json::to_value(PluginConfigResponse {
         plugin_id,
         config_dir,

@@ -71,7 +71,10 @@ pub async fn start_docker_runtime(
             plugin_id: plugin_id.to_string(),
             runtime_kind: "docker".to_string(),
             status: RuntimeStatus::Running,
-            detail: install_root.join(compose_file).to_string_lossy().to_string(),
+            detail: install_root
+                .join(compose_file)
+                .to_string_lossy()
+                .to_string(),
             pid: None,
             instance_ref: Some(instance_name),
             route_base_url: runtime.base_url.clone(),
@@ -113,18 +116,22 @@ pub async fn start_docker_runtime(
     command
         .arg("-e")
         .arg(format!("FILEUNI_PLUGIN_ID={}", plugin_id));
-    command
-        .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_HOST_API_BASE_URL={}", launch.host_api_base_url));
-    command
-        .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_HOST_API_TOKEN={}", launch.host_api_token));
-    command
-        .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_CONFIG_DIR={}", launch.plugin_config_dir));
-    command
-        .arg("-e")
-        .arg(format!("FILEUNI_PLUGIN_CONFIG_FILE={}", launch.plugin_config_file));
+    command.arg("-e").arg(format!(
+        "FILEUNI_PLUGIN_HOST_API_BASE_URL={}",
+        launch.host_api_base_url
+    ));
+    command.arg("-e").arg(format!(
+        "FILEUNI_PLUGIN_HOST_API_TOKEN={}",
+        launch.host_api_token
+    ));
+    command.arg("-e").arg(format!(
+        "FILEUNI_PLUGIN_CONFIG_DIR={}",
+        launch.plugin_config_dir
+    ));
+    command.arg("-e").arg(format!(
+        "FILEUNI_PLUGIN_CONFIG_FILE={}",
+        launch.plugin_config_file
+    ));
     command.arg(image);
     if let Some(cmd) = &runtime.command {
         command.args(cmd);

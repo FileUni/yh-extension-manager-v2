@@ -9,8 +9,7 @@ use base64::Engine;
 use bytes::Bytes;
 use sea_orm::DatabaseConnection;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set,
-    Statement,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -350,8 +349,8 @@ fn header_string(headers: &axum::http::HeaderMap, name: &str) -> Option<String> 
 
 fn forwarded_user_from_headers(headers: &axum::http::HeaderMap) -> Option<UserInfo> {
     let user_id = header_string(headers, "X-Plugin-User-ID")?;
-    let role_id = header_string(headers, "X-Plugin-User-Role")
-        .and_then(|value| value.parse::<i16>().ok())?;
+    let role_id =
+        header_string(headers, "X-Plugin-User-Role").and_then(|value| value.parse::<i16>().ok())?;
     let username = header_string(headers, "X-Plugin-User-Name").map(Arc::<str>::from);
     Some(UserInfo {
         user_id: Arc::<str>::from(user_id),
@@ -1459,7 +1458,11 @@ pub async fn ensure_plugin_config_file(
     )))
 }
 
-#[utoipa::path(post, path = "/api/v1/plugin-host/notifications/send", tag = "Plugins V2")]
+#[utoipa::path(
+    post,
+    path = "/api/v1/plugin-host/notifications/send",
+    tag = "Plugins V2"
+)]
 pub async fn send_notification(
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
