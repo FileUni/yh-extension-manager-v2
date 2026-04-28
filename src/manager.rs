@@ -87,11 +87,8 @@ async fn read_config_snapshot() -> Result<ExtensionManagerV2ConfigSnapshot, Stri
         if let Some(core_cfg) = yh_config_infra::core_crate_config::get_core_config() {
             let core_guard = core_cfg.read().await;
             let server = &core_guard.server;
-            let host = if server.get_main_ip() == "0.0.0.0" {
-                "127.0.0.1"
-            } else {
-                server.get_main_ip()
-            };
+            let host = yh_config_infra::utils::localhost_for_bind_ip(server.get_main_ip())?;
+            let host = yh_config_infra::utils::ip_addr_to_url_host(&host)?;
             format!(
                 "http://{}:{}/api/v1/plugin-host",
                 host,
