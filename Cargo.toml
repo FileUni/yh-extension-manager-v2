@@ -1,6 +1,6 @@
 [package]
 name = "yh-extension-manager-v2"
-version = "0.1.10-alpha.4"
+version = "0.1.10-alpha.5"
 edition = "2024"
 
 [dependencies]
