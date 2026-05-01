@@ -555,7 +555,7 @@ pub async fn get_user_by_id(
     axum::Extension(ctx): axum::Extension<RequestContext>,
 ) -> Result<Json<Resp>, AppError> {
     let _ = require_user(&ctx)?;
-    let parsed = uuid::Uuid::parse_str(&user_id).map_err(|e| {
+    let parsed = yh_user_center::utils::parse_user_id(&user_id).map_err(|e| {
         AppError::new(
             yh_response::error::ErrorCode::BadRequest,
             format!("invalid user id: {}", e),
@@ -1473,7 +1473,7 @@ pub async fn send_notification(
     let recipient_ids = payload
         .recipient_ids
         .iter()
-        .filter_map(|value| uuid::Uuid::parse_str(value).ok())
+        .filter_map(|value| yh_user_center::utils::parse_user_id(value).ok())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -1490,7 +1490,7 @@ pub async fn send_notification(
     let sender_id = ctx
         .user_id
         .as_deref()
-        .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        .and_then(|value| yh_user_center::utils::parse_user_id(value).ok());
     let notification_id = yh_internal_notify::InternalNotifyService::send_notification(
         state.db.as_ref(),
         yh_internal_notify::NotifyPayload {
