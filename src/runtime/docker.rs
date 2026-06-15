@@ -28,7 +28,7 @@ pub fn prepare_docker_runtime(
         detail,
         pid: None,
         instance_ref: None,
-        route_base_url: runtime.base_url.clone().or_else(|| {
+        route_base_url: runtime.effective_base_url().or_else(|| {
             runtime
                 .ports
                 .as_ref()
@@ -77,7 +77,7 @@ pub async fn start_docker_runtime(
                 .to_string(),
             pid: None,
             instance_ref: Some(instance_name),
-            route_base_url: runtime.base_url.clone(),
+            route_base_url: runtime.effective_base_url(),
         });
     }
 
@@ -157,7 +157,7 @@ pub async fn start_docker_runtime(
         detail: image.clone(),
         pid: None,
         instance_ref: Some(instance_name),
-        route_base_url: runtime.base_url.clone().or_else(|| {
+        route_base_url: runtime.effective_base_url().or_else(|| {
             runtime
                 .ports
                 .as_ref()

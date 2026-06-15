@@ -1,4 +1,7 @@
-use crate::installer::{self, InstallPluginOptions};
+use crate::installer::{
+    self, InstallPluginOptions, INSTALL_STATUS_INSTALLED, INSTALL_STATUS_PENDING,
+    INSTALL_STATUS_RUNNING,
+};
 use crate::manager::{
     PluginRuntimeStatusSnapshot, get_plugin_runtime_manager, get_runtime_status_snapshot,
 };
@@ -13,6 +16,7 @@ use axum::{
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use utoipa::ToSchema;
@@ -322,7 +326,7 @@ pub async fn install_plugin_zip(
 
     let zip_bytes = body.to_vec();
     let packages_root = PathBuf::from(runtime.layout.packages_dir);
-    let data = installer::install_plugin_from_zip_bytes(
+    let result = installer::register_plugin_from_zip_bytes(
         state.db.as_ref(),
         &packages_root,
         &zip_bytes,
@@ -340,16 +344,21 @@ pub async fn install_plugin_zip(
             ctx.request_id.to_owned(),
             ctx.client_ip.to_owned(),
         )
+    })?;
+
+    let data = serde_json::to_value(InstallPluginResponse {
+        plugin_id: result.plugin_id,
+        version: result.version,
+        status: INSTALL_STATUS_PENDING.to_string(),
+        package_dir: Some(result.package_dir),
     })
-    .and_then(|result| {
-        serde_json::to_value(result).map_err(|e| {
-            AppError::new(
-                ErrorCode::SerializationFailed,
-                e.to_string(),
-                ctx.request_id.to_owned(),
-                ctx.client_ip.to_owned(),
-            )
-        })
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
     })?;
 
     Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
@@ -596,6 +605,17 @@ pub async fn start_plugin_runtime(
                 ctx.client_ip.to_owned(),
             )
         })?;
+    if plugin.install_status == INSTALL_STATUS_PENDING {
+        return Err(AppError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "Plugin '{}' is in 'pending' state and has not been fully materialized",
+                plugin_id
+            ),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        ));
+    }
     let version = plugin.current_version.as_ref().ok_or_else(|| {
         AppError::new(
             ErrorCode::BadRequest,
@@ -641,6 +661,7 @@ pub async fn start_plugin_runtime(
                 &manager.host_api_secret_base64(),
                 &plugin_config_dir,
                 &plugin_config_file,
+                &manager.status_snapshot().layout.logs_dir,
             )
             .await
             .map_err(|e| {
@@ -699,7 +720,7 @@ pub async fn start_plugin_runtime(
     manager.set_runtime_handle(&plugin_id, handle.clone());
     ensure_default_nav_item(state.db.as_ref(), &plugin_id, &manifest).await;
     let _ =
-        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, "running").await;
+        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, INSTALL_STATUS_RUNNING).await;
     let _ = registry::append_audit_log(
         state.db.as_ref(),
         &plugin_id,
@@ -842,7 +863,7 @@ pub async fn stop_plugin_runtime(
         _ => {}
     }
     let _ =
-        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, "installed")
+        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, INSTALL_STATUS_INSTALLED)
             .await;
     let _ = registry::append_audit_log(
         state.db.as_ref(),
@@ -1060,4 +1081,163 @@ pub async fn install_from_market_url(
         )
     })?;
     Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, result)))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct InstallPluginResponse {
+    pub plugin_id: String,
+    pub version: String,
+    pub status: String,
+    pub package_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaterializePluginRequest {
+    pub version: String,
+    pub download_url_overrides: Option<HashMap<String, String>>,
+    pub config_values: Option<HashMap<String, serde_json::Value>>,
+}
+
+pub async fn get_plugin_manifest_json(
+    State(state): State<PluginAdminState>,
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+) -> Result<impl IntoResponse, AppError> {
+    let runtime = get_runtime_status_snapshot().await.map_err(|e| {
+        AppError::new(
+            ErrorCode::ConfigReadFailed,
+            e,
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    let packages_root = std::path::PathBuf::from(runtime.layout.packages_dir);
+
+    let plugin = registry::get_registry_by_id(state.db.as_ref(), &plugin_id)
+        .await
+        .map_err(|e| {
+            AppError::new(
+                ErrorCode::NotFound,
+                e.to_string(),
+                ctx.request_id.to_owned(),
+                ctx.client_ip.to_owned(),
+            )
+        })?
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::NotFound,
+                format!("Plugin '{}' not found", plugin_id),
+                ctx.request_id.to_owned(),
+                ctx.client_ip.to_owned(),
+            )
+        })?;
+
+    let current_version = plugin.current_version.ok_or_else(|| {
+        AppError::new(
+            ErrorCode::NotFound,
+            format!("Plugin '{}' has no version", plugin_id),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+
+    let package_dir = packages_root.join(&plugin_id).join(&current_version);
+    let manifest = installer::read_manifest_from_package_dir(&package_dir).await.map_err(|e| {
+        AppError::new(
+            ErrorCode::NotFound,
+            e,
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+
+    let data = serde_json::json!({
+        "name": manifest.name,
+        "version": manifest.version,
+        "install_commands": manifest.install_commands,
+        "upgrade_commands": manifest.upgrade_commands,
+        "uninstall_commands": manifest.uninstall_commands,
+        "config_schema": manifest.config_schema,
+    });
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+}
+
+pub async fn materialize_plugin(
+    State(state): State<PluginAdminState>,
+    Path(plugin_id): Path<String>,
+    axum::Extension(ctx): axum::Extension<RequestContext>,
+    Json(payload): Json<MaterializePluginRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let runtime = get_runtime_status_snapshot().await.map_err(|e| {
+        AppError::new(
+            ErrorCode::ConfigReadFailed,
+            e,
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+    let packages_root = PathBuf::from(runtime.layout.packages_dir);
+
+    let overrides = payload.download_url_overrides.unwrap_or_default();
+
+    // write config values before materialize so lifecycle commands can use them
+    if let Some(config_values) = &payload.config_values
+        && !config_values.is_empty()
+    {
+        let manager = get_plugin_runtime_manager()
+            .ok_or_else(|| AppError::internal("plugin runtime manager is not initialized", ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+        let (_, config_file) = manager
+            .ensure_plugin_config_paths(&plugin_id)
+            .await
+            .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+        let existing_content = tokio::fs::read_to_string(&config_file)
+            .await
+            .unwrap_or_else(|_| String::new());
+        let mut config: serde_json::Value = serde_json::from_str(&existing_content).unwrap_or(serde_json::json!({}));
+        if let Some(obj) = config.as_object_mut() {
+            for (key, value) in config_values {
+                obj.insert(key.clone(), value.clone());
+            }
+        }
+        let new_content = serde_json::to_string_pretty(&config)
+            .map_err(|e| AppError::internal(format!("failed to serialize config: {}", e), ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+        tokio::fs::write(&config_file, new_content.as_bytes())
+            .await
+            .map_err(|e| AppError::internal(format!("failed to write config: {}", e), ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
+    }
+
+    let result = installer::materialize_plugin_from_zip(
+        state.db.as_ref(),
+        &packages_root,
+        &plugin_id,
+        &payload.version,
+        &overrides,
+        ctx.user_id.as_ref().map(|v| v.to_string()),
+    )
+    .await
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::BadRequest,
+            e,
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+
+    let data = serde_json::to_value(InstallPluginResponse {
+        plugin_id: result.plugin_id,
+        version: result.version,
+        status: INSTALL_STATUS_INSTALLED.to_string(),
+        package_dir: Some(result.package_dir),
+    })
+    .map_err(|e| {
+        AppError::new(
+            ErrorCode::SerializationFailed,
+            e.to_string(),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        )
+    })?;
+
+    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
 }

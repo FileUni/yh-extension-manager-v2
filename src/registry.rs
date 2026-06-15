@@ -76,25 +76,6 @@ pub async fn get_version_by_plugin_and_version(
         .await
 }
 
-pub async fn mark_plugin_uninstalled(
-    db: &DatabaseConnection,
-    plugin_id: &str,
-) -> Result<Option<plugin_registry::Model>, sea_orm::DbErr> {
-    let Some(existing) = plugin_registry::Entity::find_by_id(plugin_id.to_string())
-        .one(db)
-        .await?
-    else {
-        return Ok(None);
-    };
-
-    let mut active: plugin_registry::ActiveModel = existing.into();
-    active.current_version = Set(None);
-    active.install_status = Set("uninstalled".to_string());
-    active.enabled = Set(false);
-    active.updated_at = Set(chrono::Utc::now());
-    active.update(db).await.map(Some)
-}
-
 pub async fn update_plugin_runtime_state(
     db: &DatabaseConnection,
     plugin_id: &str,

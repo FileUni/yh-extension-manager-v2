@@ -56,6 +56,14 @@ pub fn create_router(db: Arc<DatabaseConnection>) -> Router {
             "/market/install",
             axum::routing::post(handlers::install_from_market_url),
         )
+        .route(
+            "/{plugin_id}/manifest",
+            axum::routing::get(handlers::get_plugin_manifest_json),
+        )
+        .route(
+            "/{plugin_id}/materialize",
+            axum::routing::post(handlers::materialize_plugin),
+        )
         .with_state(PluginAdminState { db })
         .layer(from_fn(
             yh_api_middlewares::jwt_auth::admin_permission_middleware,

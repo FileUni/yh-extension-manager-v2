@@ -1,8 +1,10 @@
 use crate::config::get_extension_manager_v2_config;
+use crate::entities::plugin_registry;
+use crate::installer::INSTALL_STATUS_PENDING;
 use base64::Engine;
 use dashmap::DashMap;
 use rand::RngCore;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -255,7 +257,21 @@ pub async fn init_plugin_runtime_manager(
                 layout,
             };
             let mut manager = PluginRuntimeManagerV2::new(snapshot);
-            manager.db = Some(db);
+            manager.db = Some(db.clone());
+
+            let pending_count = plugin_registry::Entity::find()
+                .filter(plugin_registry::Column::InstallStatus.eq(INSTALL_STATUS_PENDING))
+                .count(db.as_ref())
+                .await
+                .unwrap_or(0);
+            if pending_count > 0 {
+                eprintln!(
+                    "[WARN] Found {} plugin(s) in 'pending' state on startup. \
+                    Use the materialize API or reinstall these plugins.",
+                    pending_count,
+                );
+            }
+
             Ok::<Arc<PluginRuntimeManagerV2>, String>(Arc::new(manager))
         })
         .await?;

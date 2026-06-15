@@ -1,4 +1,4 @@
-use crate::installer::{InstallPluginOptions, install_plugin_from_zip_bytes};
+use crate::installer::{InstallPluginOptions, register_plugin_from_zip_bytes, INSTALL_STATUS_PENDING};
 use crate::manager::get_runtime_status_snapshot;
 use crate::registry::{self, RegistryStats};
 use sea_orm::DatabaseConnection;
@@ -19,8 +19,7 @@ pub struct MarketInstallFromUrlResponse {
     pub plugin_id: String,
     pub version: String,
     pub package_dir: String,
-    pub checksum_sha256: String,
-    pub prepared_runtime_kind: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -80,7 +79,7 @@ pub async fn install_from_download_url(
         .bytes()
         .await
         .map_err(|e| format!("failed to read plugin package response body: {}", e))?;
-    let result = install_plugin_from_zip_bytes(
+    let result = register_plugin_from_zip_bytes(
         db,
         packages_root,
         &bytes,
@@ -91,7 +90,13 @@ pub async fn install_from_download_url(
         },
     )
     .await?;
-    serde_json::to_value(result).map_err(|e| e.to_string())
+    serde_json::to_value(MarketInstallFromUrlResponse {
+        plugin_id: result.plugin_id,
+        version: result.version,
+        package_dir: result.package_dir,
+        status: INSTALL_STATUS_PENDING.to_string(),
+    })
+    .map_err(|e| e.to_string())
 }
 
 pub async fn market_catalog_snapshot(

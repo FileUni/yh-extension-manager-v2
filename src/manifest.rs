@@ -57,6 +57,17 @@ pub enum PluginRuntimeKind {
     Docker,
 }
 
+impl PluginRuntimeKind {
+    pub fn as_kebab_str(&self) -> &'static str {
+        match self {
+            PluginRuntimeKind::WasmComponent => "wasm-component",
+            PluginRuntimeKind::WasmModule => "wasm-module",
+            PluginRuntimeKind::Process => "process",
+            PluginRuntimeKind::Docker => "docker",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct PluginUiManifest {
     pub root: String,
@@ -82,6 +93,7 @@ pub struct WasmRuntimeManifest {
     pub env: Option<BTreeMap<String, String>>,
     #[serde(alias = "base_url", alias = "base-url")]
     pub base_url: Option<String>,
+    pub network: Option<PluginNetworkManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -92,6 +104,7 @@ pub struct ProcessRuntimeManifest {
     pub env: Option<BTreeMap<String, String>>,
     pub stdin: Option<String>,
     pub base_url: Option<String>,
+    pub network: Option<PluginNetworkManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -120,6 +133,63 @@ pub struct DockerRuntimeManifest {
     pub volumes: Option<Vec<DockerVolumeMapping>>,
     pub workdir: Option<String>,
     pub base_url: Option<String>,
+    pub network: Option<PluginNetworkManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginNetworkMode {
+    Proxy,
+    Direct,
+    Both,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct PluginNetworkManifest {
+    pub mode: Option<PluginNetworkMode>,
+    pub port: Option<u16>,
+    pub base_url: Option<String>,
+}
+
+impl PluginNetworkManifest {
+    pub fn mode(&self) -> PluginNetworkMode {
+        self.mode.clone().unwrap_or(PluginNetworkMode::Proxy)
+    }
+
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+}
+
+impl ProcessRuntimeManifest {
+    pub fn effective_base_url(&self) -> Option<String> {
+        self.network
+            .as_ref()
+            .and_then(|n| n.base_url.clone())
+            .or_else(|| self.base_url.clone())
+    }
+}
+
+impl WasmRuntimeManifest {
+    pub fn effective_base_url(&self) -> Option<String> {
+        self.network
+            .as_ref()
+            .and_then(|n| n.base_url.clone())
+            .or_else(|| self.base_url.clone())
+    }
+}
+
+impl DockerRuntimeManifest {
+    pub fn effective_base_url(&self) -> Option<String> {
+        self.network
+            .as_ref()
+            .and_then(|n| n.base_url.clone())
+            .or_else(|| self.base_url.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -127,8 +197,53 @@ pub struct DockerRuntimeManifest {
 pub enum PluginRuntimeManifest {
     WasmComponent(WasmRuntimeManifest),
     WasmModule(WasmRuntimeManifest),
+    #[serde(alias = "process")]
     Process(ProcessRuntimeManifest),
+    #[serde(alias = "docker")]
     Docker(DockerRuntimeManifest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginSetupAction {
+    Download,
+    Extract,
+    Move,
+    Copy,
+    Symlink,
+    Chmod,
+    Mkdir,
+    Remove,
+    Run,
+    Touch,
+    WriteFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(untagged)]
+pub enum PluginSetupCondition {
+    FileNotExists { file_not_exists: String },
+    FileExists { file_exists: String },
+    EnvNotSet { env_not_set: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct PluginSetupStep {
+    pub action: PluginSetupAction,
+    pub url: Option<String>,
+    pub source: Option<String>,
+    pub dest: Option<String>,
+    pub archive_format: Option<String>,
+    pub strip_components: Option<u32>,
+    pub mode: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub content: Option<String>,
+    #[serde(alias = "sha256", alias = "sha-256")]
+    pub sha256: Option<String>,
+    pub archive: Option<String>,
+    #[serde(alias = "if")]
+    pub if_condition: Option<PluginSetupCondition>,
+    pub symlink_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
@@ -147,6 +262,41 @@ pub struct PluginManifest {
     pub homepage_url: Option<String>,
     pub repository_url: Option<String>,
     pub checksum_sha256: Option<String>,
+    pub install_commands: Option<Vec<PluginSetupStep>>,
+    pub upgrade_commands: Option<Vec<PluginSetupStep>>,
+    pub uninstall_commands: Option<Vec<PluginSetupStep>>,
+    pub config_schema: Option<serde_json::Value>,
+}
+
+impl PluginRuntimeManifest {
+    pub fn network(&self) -> PluginNetworkManifest {
+        let direct_base_url = match self {
+            PluginRuntimeManifest::WasmComponent(r) | PluginRuntimeManifest::WasmModule(r) => {
+                r.base_url.clone()
+            }
+            PluginRuntimeManifest::Process(r) => r.base_url.clone(),
+            PluginRuntimeManifest::Docker(r) => r.base_url.clone(),
+        };
+        let network = match self {
+            PluginRuntimeManifest::WasmComponent(r)
+            | PluginRuntimeManifest::WasmModule(r) => r.network.clone(),
+            PluginRuntimeManifest::Process(r) => r.network.clone(),
+            PluginRuntimeManifest::Docker(r) => r.network.clone(),
+        };
+        let mut resolved = network.unwrap_or(PluginNetworkManifest {
+            mode: None,
+            port: None,
+            base_url: None,
+        });
+        if resolved.base_url.is_none() {
+            resolved.base_url = direct_base_url;
+        }
+        resolved
+    }
+
+    pub fn base_url(&self) -> Option<String> {
+        self.network().base_url
+    }
 }
 
 impl PluginManifest {
@@ -202,6 +352,33 @@ impl PluginManifest {
                     return Err(
                         "docker runtime requires image, oci_archive, or compose_file".to_string(),
                     );
+                }
+            }
+        }
+
+        for (label, steps) in [
+            ("install_commands", &self.install_commands),
+            ("upgrade_commands", &self.upgrade_commands),
+            ("uninstall_commands", &self.uninstall_commands),
+        ] {
+            if let Some(entries) = steps {
+                for (i, step) in entries.iter().enumerate() {
+                    if matches!(step.action, PluginSetupAction::Download)
+                        && step.url.as_ref().map(|v| v.trim().is_empty()).unwrap_or(true)
+                    {
+                        return Err(format!(
+                            "{}[{}].url is required for Download action in {}",
+                            label, i, label
+                        ));
+                    }
+                    if let Some(ref sha) = step.sha256 {
+                        if sha.len() != 64 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                            return Err(format!(
+                                "{}[{}].sha256 must be a 64-character hex string, got '{}'",
+                                label, i, sha
+                            ));
+                        }
+                    }
                 }
             }
         }

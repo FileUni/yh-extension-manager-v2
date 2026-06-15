@@ -79,7 +79,7 @@ pub async fn start_wasm_module_runtime(
         detail,
         pid: Some(pid),
         instance_ref: Some(instance_ref),
-        route_base_url: runtime.base_url.clone(),
+        route_base_url: runtime.effective_base_url(),
     })
 }
 
@@ -124,7 +124,7 @@ pub async fn start_wasm_component_runtime(
         detail,
         pid: Some(pid),
         instance_ref: Some(instance_ref),
-        route_base_url: runtime.base_url.clone(),
+        route_base_url: runtime.effective_base_url(),
     })
 }
 

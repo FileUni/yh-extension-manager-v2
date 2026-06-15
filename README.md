@@ -5,10 +5,10 @@
 | Path | Key Functions |
 |------|---------------|
 | `src/manager.rs` | `init_plugin_runtime_manager`, `start/stop_plugin_runtime`, `read_config_snapshot` |
-| `src/installer.rs` | `install_plugin_from_zip_bytes`, `read_manifest_from_zip_bytes`, `extract_plugin_zip_to_dir` |
+| `src/installer.rs` | `register_plugin_from_zip_bytes`, `materialize_plugin_from_zip`, `read_manifest_from_zip_bytes`, `extract_plugin_zip_to_dir` |
 | `src/host_api.rs` | `ensure_sqlite_database`, `upsert_shared_record`, `execute_migration`, `upsert_task/nav_item` |
 | `src/public.rs` | `serve_plugin_ui_file`, `proxy_plugin_api`, `proxy_plugin_ws_inner` |
-| `src/handlers.rs` | HTTP handlers: start/stop/uninstall/status |
+| `src/handlers.rs` | HTTP handlers: start/stop/uninstall/materialize/status |
 | `src/manifest.rs` | `PluginManifest`, `PluginRuntimeManifest`, permissions |
 | `src/runtime/wasm.rs` | `start_wasm_module/component_runtime`, dev fallback |
 | `src/runtime/process.rs` | `start_process_runtime`, spawn external executable |
@@ -26,9 +26,20 @@
 
 `start_docker_runtime` supports: (1) OCI archive: `docker load -i` then run; (2) Compose: `docker compose -f up -d`; (3) Image run: `docker run -d --rm --name fileuni-plg-{plugin_id}` with port/volume/env mapping. Stop: `docker stop` via instance_ref.
 
+## Install Status Constants
+
+`installer.rs` defines string constants for all install status values:
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `INSTALL_STATUS_PENDING` | `"pending"` | ZIP registered, not yet materialized |
+| `INSTALL_STATUS_INSTALLED` | `"installed"` | Fully installed or runtime stopped |
+| `INSTALL_STATUS_RUNNING` | `"running"` | Plugin runtime is active |
+| `INSTALL_STATUS_UNINSTALLED` | `"uninstalled"` | Reserved (uninstall currently does hard delete) |
+
 ## Core Algorithms
 
-- **Install**: unzip -> verify runtime artifact -> write registry/version/audit
+- **ZIP install (two-phase)**: (1) register: unzip -> write registry/version/audit -> set `install_status = "pending"`; (2) materialize: verify runtime artifact -> execute lifecycle commands -- `install_commands`, `upgrade_commands`, `uninstall_commands` -> set `install_status = "installed"`
 - **UI**: file-first, fallback to `index.html` SPA
 - **HTTP proxy**: reuse `route_base_url`, inject `X-Plugin-*` headers
 - **WS proxy**: bidirectional bridge, target from `route_base_url + /ws/*`
