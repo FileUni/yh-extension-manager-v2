@@ -95,3 +95,57 @@ pub async fn delete_plugin_permission_grants(
             .rows_affected,
     )
 }
+
+/// Check if a plugin has been granted a specific permission
+pub async fn check_plugin_permission(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    required_permission: PluginPermission,
+) -> Result<bool, String> {
+    let permission_key = required_permission.as_key();
+
+    let grant = crate::entities::plugin_permission_grant::Entity::find()
+        .filter(crate::entities::plugin_permission_grant::Column::PluginId.eq(plugin_id))
+        .filter(crate::entities::plugin_permission_grant::Column::PermissionKey.eq(permission_key))
+        .one(db)
+        .await
+        .map_err(|e| format!("failed to check plugin permission: {}", e))?;
+
+    Ok(grant.map(|g| g.granted).unwrap_or(false))
+}
+
+/// Check if a plugin has been granted all required permissions
+pub async fn check_plugin_permissions(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    required_permissions: &[PluginPermission],
+) -> Result<bool, String> {
+    if required_permissions.is_empty() {
+        return Ok(true);
+    }
+
+    for permission in required_permissions {
+        if !check_plugin_permission(db, plugin_id, permission.clone()).await? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Check single permission and return detailed error if denied
+pub async fn require_plugin_permission(
+    db: &DatabaseConnection,
+    plugin_id: &str,
+    required_permission: PluginPermission,
+) -> Result<(), String> {
+    if !check_plugin_permission(db, plugin_id, required_permission.clone()).await? {
+        return Err(format!(
+            "plugin '{}' does not have permission '{}'",
+            plugin_id,
+            required_permission.as_key()
+        ));
+    }
+    Ok(())
+}
+

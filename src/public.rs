@@ -331,12 +331,28 @@ pub async fn proxy_plugin_api(
     {
         builder = builder.header("X-Plugin-Authorization", auth_header);
     }
+
+    // Add authenticated plugin_id with HMAC signature
+    let manager = get_plugin_runtime_manager().ok_or_else(|| {
+        internal_error(&ctx, "plugin runtime manager is not initialized")
+    })?;
+    let plugin_id_signature = manager.sign_user_context(&plugin_id, "", 0);
+    builder = builder.header("X-Plugin-ID", &plugin_id);
+    builder = builder.header("X-Plugin-ID-Signature", plugin_id_signature);
+
     if let Some((user_id, role_id, username)) = forwarded_user {
-        builder = builder.header("X-Plugin-User-ID", user_id);
+        builder = builder.header("X-Plugin-User-ID", &user_id);
         builder = builder.header("X-Plugin-User-Role", role_id.to_string());
-        if let Some(username) = username {
-            builder = builder.header("X-Plugin-User-Name", username);
+        if let Some(ref username_str) = username {
+            builder = builder.header("X-Plugin-User-Name", username_str);
         }
+
+        let signature = manager.sign_user_context(
+            &user_id,
+            username.as_deref().unwrap_or(""),
+            role_id
+        );
+        builder = builder.header("X-Plugin-User-Signature", signature);
     }
     let response = builder
         .body(body)

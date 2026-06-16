@@ -21,6 +21,9 @@ use zip::ZipArchive;
 
 pub const FILEUNI_PLUGIN_MARKET_BASE_URL: &str = "https://www.fileuni.com/api/plugins";
 
+pub const PLUGIN_MANIFEST_FILE_NAME: &str = "plugin.json";
+pub const PLUGIN_DEFAULT_CONFIG_FILE_NAME: &str = "config.toml";
+
 pub const INSTALL_STATUS_PENDING: &str = "pending";
 pub const INSTALL_STATUS_INSTALLED: &str = "installed";
 pub const INSTALL_STATUS_RUNNING: &str = "running";
@@ -118,12 +121,12 @@ pub fn read_manifest_from_zip_bytes(zip_bytes: &[u8]) -> Result<PluginManifest, 
     let mut archive =
         ZipArchive::new(reader).map_err(|e| format!("invalid plugin package: {}", e))?;
     let mut manifest_file = archive
-        .by_name("plugin.json")
-        .map_err(|e| format!("plugin.json is required: {}", e))?;
+        .by_name(PLUGIN_MANIFEST_FILE_NAME)
+        .map_err(|e| format!("{} is required in plugin package root: {}", PLUGIN_MANIFEST_FILE_NAME, e))?;
     let mut manifest_text = String::new();
     manifest_file
         .read_to_string(&mut manifest_text)
-        .map_err(|e| format!("failed to read plugin.json: {}", e))?;
+        .map_err(|e| format!("failed to read {}: {}", PLUGIN_MANIFEST_FILE_NAME, e))?;
     let manifest: PluginManifest = serde_json::from_str(&manifest_text)
         .map_err(|e| format!("invalid plugin manifest: {}", e))?;
     manifest.validate()?;
@@ -131,7 +134,7 @@ pub fn read_manifest_from_zip_bytes(zip_bytes: &[u8]) -> Result<PluginManifest, 
 }
 
 pub async fn read_manifest_from_package_dir(package_dir: &Path) -> Result<PluginManifest, String> {
-    let manifest_path = package_dir.join("plugin.json");
+    let manifest_path = package_dir.join(PLUGIN_MANIFEST_FILE_NAME);
     let manifest_text = tokio::fs::read_to_string(&manifest_path)
         .await
         .map_err(|e| {
@@ -267,6 +270,70 @@ fn validate_prepared_runtime(
     Ok(handle.runtime_kind)
 }
 
+/// Perform basic validation at registration time without executing lifecycle commands
+/// This catches obvious errors like missing runtime artifacts before DB write
+fn validate_prepared_runtime_basic(
+    manifest: &PluginManifest,
+    install_root: &Path,
+) -> Result<(), String> {
+    match &manifest.runtime {
+        PluginRuntimeManifest::WasmComponent(runtime_manifest) |
+        PluginRuntimeManifest::WasmModule(runtime_manifest) => {
+            // Check wasm artifact exists
+            let artifact_path = install_root.join(&runtime_manifest.artifact);
+            if !artifact_path.exists() {
+                return Err(format!(
+                    "wasm artifact '{}' not found in package",
+                    runtime_manifest.artifact
+                ));
+            }
+        }
+        PluginRuntimeManifest::Process(runtime_manifest) => {
+            // Check program executable exists
+            let program_path = install_root.join(&runtime_manifest.program);
+            if !program_path.exists() {
+                return Err(format!(
+                    "process program '{}' not found in package",
+                    runtime_manifest.program
+                ));
+            }
+        }
+        PluginRuntimeManifest::Docker(runtime_manifest) => {
+            // For docker, check if image name or oci_archive or compose_file is specified
+            if runtime_manifest.image.is_none()
+                && runtime_manifest.oci_archive.is_none()
+                && runtime_manifest.compose_file.is_none()
+            {
+                return Err("docker runtime must specify image, oci_archive, or compose_file".to_string());
+            }
+
+            // If oci_archive specified, check it exists
+            if let Some(ref archive) = runtime_manifest.oci_archive {
+                let archive_path = install_root.join(archive);
+                if !archive_path.exists() {
+                    return Err(format!(
+                        "docker oci_archive '{}' not found in package",
+                        archive
+                    ));
+                }
+            }
+
+            // If compose_file specified, check it exists
+            if let Some(ref compose) = runtime_manifest.compose_file {
+                let compose_path = install_root.join(compose);
+                if !compose_path.exists() {
+                    return Err(format!(
+                        "docker compose_file '{}' not found in package",
+                        compose
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+
 pub async fn register_plugin_from_zip_bytes(
     db: &DatabaseConnection,
     packages_root: &Path,
@@ -299,6 +366,10 @@ pub async fn register_plugin_from_zip_bytes(
     }
 
     extract_plugin_zip_to_dir(zip_bytes, &package_dir).await?;
+
+    // Perform basic validation at registration time to catch obvious errors
+    // Full validation with lifecycle commands happens during materialize
+    validate_prepared_runtime_basic(&manifest, &package_dir)?;
 
     let now = chrono::Utc::now();
     let plugin_existing = plugin_registry::Entity::find_by_id(manifest.id.clone())

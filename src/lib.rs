@@ -17,6 +17,7 @@ pub use config::{
     ExtensionManagerV2AppConfig, ExtensionManagerV2Config, ExtensionManagerV2ConfigManager,
     get_extension_manager_v2_config, init_extension_manager_v2_config,
 };
+pub use installer::{PLUGIN_DEFAULT_CONFIG_FILE_NAME, PLUGIN_MANIFEST_FILE_NAME};
 pub use manager::{
     PluginRuntimeManagerV2, PluginRuntimeStatusSnapshot, get_plugin_runtime_manager,
     get_runtime_status_snapshot, init_plugin_runtime_manager,

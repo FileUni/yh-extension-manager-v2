@@ -351,10 +351,22 @@ fn forwarded_user_from_headers(headers: &axum::http::HeaderMap) -> Option<UserIn
     let user_id = header_string(headers, "X-Plugin-User-ID")?;
     let role_id =
         header_string(headers, "X-Plugin-User-Role").and_then(|value| value.parse::<i16>().ok())?;
-    let username = header_string(headers, "X-Plugin-User-Name").map(Arc::<str>::from);
+    let username = header_string(headers, "X-Plugin-User-Name");
+    let signature = header_string(headers, "X-Plugin-User-Signature")?;
+
+    let manager = crate::manager::get_plugin_runtime_manager()?;
+    let username_for_sig = username.as_deref().unwrap_or("");
+    if !manager.verify_user_context_signature(&user_id, username_for_sig, role_id, &signature) {
+        eprintln!(
+            "WARNING: invalid user context signature from plugin (user_id={}, role_id={})",
+            user_id, role_id
+        );
+        return None;
+    }
+
     Some(UserInfo {
         user_id: Arc::<str>::from(user_id),
-        username,
+        username: username.map(Arc::<str>::from),
         role_id,
         session_id: None,
         status: None,
@@ -416,6 +428,61 @@ fn internal_error(ctx: &RequestContext, message: impl Into<String>) -> AppError 
         Arc::clone(&ctx.client_ip),
     )
 }
+
+fn permission_denied(ctx: &RequestContext, message: impl Into<String>) -> AppError {
+    AppError::new(
+        yh_response::error::ErrorCode::Forbidden,
+        message,
+        Arc::clone(&ctx.request_id),
+        Arc::clone(&ctx.client_ip),
+    )
+}
+
+/// Require authenticated plugin_id from headers
+fn require_authenticated_plugin_id(
+    headers: &axum::http::HeaderMap,
+    ctx: &RequestContext,
+) -> Result<String, AppError> {
+    let plugin_id = header_string(headers, "X-Plugin-ID").ok_or_else(|| {
+        AppError::new(
+            yh_response::error::ErrorCode::Forbidden,
+            "Missing X-Plugin-ID header",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        )
+    })?;
+
+    let signature = header_string(headers, "X-Plugin-ID-Signature").ok_or_else(|| {
+        AppError::new(
+            yh_response::error::ErrorCode::Forbidden,
+            "Missing X-Plugin-ID-Signature header",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        )
+    })?;
+
+    let manager = crate::manager::get_plugin_runtime_manager().ok_or_else(|| {
+        AppError::internal(
+            "plugin runtime manager is not initialized",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        )
+    })?;
+
+    // Verify signature using same method as user context (plugin_id as user_id, empty username, 0 role)
+    if manager.verify_user_context_signature(&plugin_id, "", 0, &signature) {
+        Ok(plugin_id)
+    } else {
+        eprintln!("WARNING: Invalid X-Plugin-ID signature for plugin_id: {}", plugin_id);
+        Err(AppError::new(
+            yh_response::error::ErrorCode::Forbidden,
+            "Invalid X-Plugin-ID signature",
+            Arc::clone(&ctx.request_id),
+            Arc::clone(&ctx.client_ip),
+        ))
+    }
+}
+
 
 fn sanitize_sqlite_component(value: &str) -> String {
     value
@@ -533,8 +600,19 @@ async fn create_user_scoped_engine(
 
 #[utoipa::path(get, path = "/api/v1/plugin-host/identity", tag = "Plugins V2")]
 pub async fn get_identity(
+    State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Resp>, AppError> {
+    let plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::AuthRead,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let (user_id, role_id, username) = require_user(&ctx)?;
     let payload = HostIdentityResponse {
         user_id: user_id.to_string(),
@@ -553,8 +631,19 @@ pub async fn get_user_by_id(
     State(state): State<HostApiState>,
     Path(user_id): Path<String>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Resp>, AppError> {
     let _ = require_user(&ctx)?;
+
+    let plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::UserLookup,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let parsed = yh_user_center::utils::parse_user_id(&user_id).map_err(|e| {
         AppError::new(
             yh_response::error::ErrorCode::BadRequest,
@@ -596,11 +685,22 @@ pub async fn get_user_by_id(
     tag = "Plugins V2"
 )]
 pub async fn check_permission(
+    headers: axum::http::HeaderMap,
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostPermissionCheckRequest>,
 ) -> Result<Json<Resp>, AppError> {
     let (user_id, role_id, _) = require_user(&ctx)?;
+
+    let plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::UserPermissionCheck,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let allowed = yh_user_center::services::user_service::UserService::has_permission(
         state.db.as_ref(),
         user_id,
@@ -620,9 +720,41 @@ pub async fn check_permission(
 #[utoipa::path(post, path = "/api/v1/plugin-host/kv/set", tag = "Plugins V2")]
 pub async fn set_kv(
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    headers: axum::http::HeaderMap,
+    State(state): State<HostApiState>,
     Json(payload): Json<HostKvSetRequest>,
 ) -> Result<Json<Resp>, AppError> {
     let _ = require_user(&ctx)?;
+
+    // Get authenticated calling plugin_id
+    let calling_plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+
+    // Extract target plugin_id from namespaced key (format: plugin:{plugin_id}:{key})
+    let target_plugin_id = payload.key.strip_prefix("plugin:")
+        .and_then(|stripped| stripped.find(':').map(|plugin_id_end| &stripped[..plugin_id_end]));
+
+    // Verify calling plugin matches the key's namespace
+    if let Some(target_id) = target_plugin_id {
+        if calling_plugin_id != target_id {
+            return Err(permission_denied(
+                &ctx,
+                format!(
+                    "Plugin '{}' cannot access namespace of plugin '{}'",
+                    calling_plugin_id, target_id
+                ),
+            ));
+        }
+
+        // Check the calling plugin has the permission
+        crate::permissions::require_plugin_permission(
+            state.db.as_ref(),
+            &calling_plugin_id,
+            crate::manifest::PluginPermission::KvWrite,
+        )
+        .await
+        .map_err(|e| permission_denied(&ctx, e))?;
+    }
+
     yh_fast_kv_storage_hub::api::helpers::set(
         &payload.key,
         Bytes::from(payload.value.into_bytes()),
@@ -657,8 +789,39 @@ pub async fn build_kv_namespace(
 pub async fn get_kv(
     axum::extract::Path(key): axum::extract::Path<String>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    headers: axum::http::HeaderMap,
+    State(state): State<HostApiState>,
 ) -> Result<Json<Resp>, AppError> {
     let _ = require_user(&ctx)?;
+
+    // Get authenticated calling plugin_id
+    let calling_plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+
+    // Extract target plugin_id from namespaced key
+    let target_plugin_id = key.strip_prefix("plugin:")
+        .and_then(|stripped| stripped.find(':').map(|plugin_id_end| &stripped[..plugin_id_end]));
+
+    // Verify calling plugin matches the key's namespace
+    if let Some(target_id) = target_plugin_id {
+        if calling_plugin_id != target_id {
+            return Err(permission_denied(
+                &ctx,
+                format!(
+                    "Plugin '{}' cannot access namespace of plugin '{}'",
+                    calling_plugin_id, target_id
+                ),
+            ));
+        }
+
+        crate::permissions::require_plugin_permission(
+            state.db.as_ref(),
+            &calling_plugin_id,
+            crate::manifest::PluginPermission::KvRead,
+        )
+        .await
+        .map_err(|e| permission_denied(&ctx, e))?;
+    }
+
     let value = yh_fast_kv_storage_hub::api::helpers::get(&key)
         .await
         .map_err(|e| internal_error(&ctx, format!("kv get failed: {}", e)))?
@@ -675,8 +838,39 @@ pub async fn get_kv(
 pub async fn delete_kv(
     Path(key): Path<String>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    headers: axum::http::HeaderMap,
+    State(state): State<HostApiState>,
 ) -> Result<Json<Resp>, AppError> {
     let _ = require_user(&ctx)?;
+
+    // Get authenticated calling plugin_id
+    let calling_plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+
+    // Extract target plugin_id from namespaced key
+    let target_plugin_id = key.strip_prefix("plugin:")
+        .and_then(|stripped| stripped.find(':').map(|plugin_id_end| &stripped[..plugin_id_end]));
+
+    // Verify calling plugin matches the key's namespace
+    if let Some(target_id) = target_plugin_id {
+        if calling_plugin_id != target_id {
+            return Err(permission_denied(
+                &ctx,
+                format!(
+                    "Plugin '{}' cannot access namespace of plugin '{}'",
+                    calling_plugin_id, target_id
+                ),
+            ));
+        }
+
+        crate::permissions::require_plugin_permission(
+            state.db.as_ref(),
+            &calling_plugin_id,
+            crate::manifest::PluginPermission::KvDelete,
+        )
+        .await
+        .map_err(|e| permission_denied(&ctx, e))?;
+    }
+
     let deleted = yh_fast_kv_storage_hub::api::helpers::del(&key)
         .await
         .map_err(|e| internal_error(&ctx, format!("kv delete failed: {}", e)))?;
@@ -694,6 +888,22 @@ pub async fn read_vfs_text(
     Query(query): Query<HostVfsReadTextQuery>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
 ) -> Result<Json<Resp>, AppError> {
+    require_plugin_or_user(&ctx)?;
+
+    // Extract plugin_id from logical_path (format: /.plugins/{plugin_id}/...)
+    if let Some(stripped) = query.logical_path.strip_prefix("/.plugins/") {
+        if let Some(plugin_id_end) = stripped.find('/') {
+            let plugin_id = &stripped[..plugin_id_end];
+            crate::permissions::require_plugin_permission(
+                state.db.as_ref(),
+                plugin_id,
+                crate::manifest::PluginPermission::VfsRead,
+            )
+            .await
+            .map_err(|e| permission_denied(&ctx, e))?;
+        }
+    }
+
     let storage = create_user_scoped_engine(&state, &ctx).await?;
     let (bytes, _) = storage
         .read(&query.logical_path)
@@ -716,6 +926,22 @@ pub async fn write_vfs_text(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostVfsWriteTextRequest>,
 ) -> Result<Json<Resp>, AppError> {
+    require_plugin_or_user(&ctx)?;
+
+    // Extract plugin_id from logical_path (format: /.plugins/{plugin_id}/...)
+    if let Some(stripped) = payload.logical_path.strip_prefix("/.plugins/") {
+        if let Some(plugin_id_end) = stripped.find('/') {
+            let plugin_id = &stripped[..plugin_id_end];
+            crate::permissions::require_plugin_permission(
+                state.db.as_ref(),
+                plugin_id,
+                crate::manifest::PluginPermission::VfsWrite,
+            )
+            .await
+            .map_err(|e| permission_denied(&ctx, e))?;
+        }
+    }
+
     let storage = create_user_scoped_engine(&state, &ctx).await?;
     storage
         .write(
@@ -737,6 +963,22 @@ pub async fn write_vfs_bytes(
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostVfsWriteBytesRequest>,
 ) -> Result<Json<Resp>, AppError> {
+    require_plugin_or_user(&ctx)?;
+
+    // Extract plugin_id from logical_path (format: /.plugins/{plugin_id}/...)
+    if let Some(stripped) = payload.logical_path.strip_prefix("/.plugins/") {
+        if let Some(plugin_id_end) = stripped.find('/') {
+            let plugin_id = &stripped[..plugin_id_end];
+            crate::permissions::require_plugin_permission(
+                state.db.as_ref(),
+                plugin_id,
+                crate::manifest::PluginPermission::VfsWrite,
+            )
+            .await
+            .map_err(|e| permission_denied(&ctx, e))?;
+        }
+    }
+
     let storage = create_user_scoped_engine(&state, &ctx).await?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(payload.content_base64.as_bytes())
@@ -784,9 +1026,21 @@ pub async fn get_db_info(
 )]
 pub async fn ensure_sqlite_database(
     axum::Extension(ctx): axum::Extension<RequestContext>,
+    State(state): State<HostApiState>,
     Json(payload): Json<HostSqliteEnsureRequest>,
 ) -> Result<Json<Resp>, AppError> {
     let (user_id, _, _) = require_user(&ctx)?;
+    let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSqlite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let system_cfg = get_system_config()
         .ok_or_else(|| internal_error(&ctx, "system config manager is not initialized"))?;
     let temp_dir = system_cfg.read().await.system.get_temp_dir().to_string();
@@ -839,6 +1093,15 @@ pub async fn upsert_shared_record(
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let collection = validate_host_plugin_identifier(&payload.collection, "collection", &ctx)?;
     let record_key = validate_host_plugin_identifier(&payload.record_key, "record_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSharedWrite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
 
     let existing = crate::entities::plugin_shared_record::Entity::find()
         .filter(crate::entities::plugin_shared_record::Column::PluginId.eq(plugin_id.as_str()))
@@ -898,6 +1161,16 @@ pub async fn get_shared_record(
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let collection = validate_host_plugin_identifier(&query.collection, "collection", &ctx)?;
     let record_key = validate_host_plugin_identifier(&query.record_key, "record_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSharedRead,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let model = crate::entities::plugin_shared_record::Entity::find()
         .filter(crate::entities::plugin_shared_record::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_shared_record::Column::Collection.eq(collection.as_str()))
@@ -937,6 +1210,16 @@ pub async fn list_shared_records(
     let (user_id, _, _) = require_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let collection = validate_host_plugin_identifier(&query.collection, "collection", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSharedRead,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let records = crate::entities::plugin_shared_record::Entity::find()
         .filter(crate::entities::plugin_shared_record::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_shared_record::Column::Collection.eq(collection.as_str()))
@@ -975,6 +1258,16 @@ pub async fn delete_shared_record(
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let collection = validate_host_plugin_identifier(&query.collection, "collection", &ctx)?;
     let record_key = validate_host_plugin_identifier(&query.record_key, "record_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSharedWrite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let deleted = crate::entities::plugin_shared_record::Entity::delete_many()
         .filter(crate::entities::plugin_shared_record::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_shared_record::Column::Collection.eq(collection.as_str()))
@@ -1008,6 +1301,16 @@ pub async fn upsert_migration_state(
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
     let migration_key =
         validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSqlite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let existing = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
@@ -1069,6 +1372,16 @@ pub async fn get_migration_state(
     let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
     let migration_key =
         validate_host_plugin_identifier(&query.migration_key, "migration_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSqlite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let model = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
@@ -1113,6 +1426,16 @@ pub async fn list_migration_states(
     require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
     let scope = validate_host_plugin_identifier(&query.scope, "scope", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSqlite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let states = crate::entities::plugin_migration_state::Entity::find()
         .filter(crate::entities::plugin_migration_state::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_migration_state::Column::Scope.eq(scope.as_str()))
@@ -1150,6 +1473,16 @@ pub async fn execute_migration(
     let scope = validate_host_plugin_identifier(&payload.scope, "scope", &ctx)?;
     let migration_key =
         validate_host_plugin_identifier(&payload.migration_key, "migration_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::DbSqlite,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let sql = load_installed_migration_sql(state.db.as_ref(), &plugin_id, &scope, &migration_key)
         .await
         .map_err(|e| internal_error(&ctx, e))?;
@@ -1234,6 +1567,16 @@ pub async fn upsert_task(
     require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let task_key = validate_host_plugin_identifier(&payload.task_key, "task_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::Scheduler,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let existing = crate::entities::plugin_task::Entity::find()
         .filter(crate::entities::plugin_task::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_task::Column::TaskKey.eq(task_key.as_str()))
@@ -1291,6 +1634,16 @@ pub async fn list_tasks(
 ) -> Result<Json<Resp>, AppError> {
     require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&query.plugin_id, "plugin_id", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::Scheduler,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let tasks = crate::entities::plugin_task::Entity::find()
         .filter(crate::entities::plugin_task::Column::PluginId.eq(plugin_id.as_str()))
         .all(state.db.as_ref())
@@ -1323,6 +1676,16 @@ pub async fn upsert_nav_item(
     require_plugin_or_user(&ctx)?;
     let plugin_id = validate_host_plugin_identifier(&payload.plugin_id, "plugin_id", &ctx)?;
     let item_key = validate_host_plugin_identifier(&payload.item_key, "item_key", &ctx)?;
+
+    // Check permission
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::WebApi,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
+
     let existing = crate::entities::plugin_nav_item::Entity::find()
         .filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()))
         .filter(crate::entities::plugin_nav_item::Column::ItemKey.eq(item_key.as_str()))
@@ -1391,9 +1754,20 @@ pub async fn list_nav_items(
     Query(query): Query<HostNavItemListQuery>,
 ) -> Result<Json<Resp>, AppError> {
     require_plugin_or_user(&ctx)?;
+
     let mut select = crate::entities::plugin_nav_item::Entity::find();
     if let Some(plugin_id) = query.plugin_id.as_deref() {
         let plugin_id = validate_host_plugin_identifier(plugin_id, "plugin_id", &ctx)?;
+
+        // Check permission
+        crate::permissions::require_plugin_permission(
+            state.db.as_ref(),
+            &plugin_id,
+            crate::manifest::PluginPermission::WebApi,
+        )
+        .await
+        .map_err(|e| permission_denied(&ctx, e))?;
+
         select = select
             .filter(crate::entities::plugin_nav_item::Column::PluginId.eq(plugin_id.as_str()));
     }
@@ -1464,11 +1838,21 @@ pub async fn ensure_plugin_config_file(
     tag = "Plugins V2"
 )]
 pub async fn send_notification(
+    headers: axum::http::HeaderMap,
     State(state): State<HostApiState>,
     axum::Extension(ctx): axum::Extension<RequestContext>,
     Json(payload): Json<HostNotificationSendRequest>,
 ) -> Result<Json<Resp>, AppError> {
     require_plugin_or_user(&ctx)?;
+
+    let plugin_id = require_authenticated_plugin_id(&headers, &ctx)?;
+    crate::permissions::require_plugin_permission(
+        state.db.as_ref(),
+        &plugin_id,
+        crate::manifest::PluginPermission::WebApi,
+    )
+    .await
+    .map_err(|e| permission_denied(&ctx, e))?;
 
     let recipient_ids = payload
         .recipient_ids

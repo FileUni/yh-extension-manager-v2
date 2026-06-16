@@ -616,6 +616,19 @@ pub async fn start_plugin_runtime(
             ctx.client_ip.to_owned(),
         ));
     }
+    if plugin.install_status == INSTALL_STATUS_RUNNING {
+        return Err(AppError::new(
+            ErrorCode::BadRequest,
+            format!("Plugin '{}' is already running", plugin_id),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        ));
+    }
+
+    // Record old status for rollback
+    let old_status = plugin.install_status.clone();
+    let old_enabled = plugin.enabled;
+
     let version = plugin.current_version.as_ref().ok_or_else(|| {
         AppError::new(
             ErrorCode::BadRequest,
@@ -651,7 +664,12 @@ pub async fn start_plugin_runtime(
         .ensure_plugin_config_paths(&plugin_id)
         .await
         .map_err(|e| AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))?;
-    let handle = match &manifest.runtime {
+
+    // Update DB state to running before starting runtime
+    let _ = registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, INSTALL_STATUS_RUNNING).await;
+
+    // Try to start runtime
+    let handle_result = match &manifest.runtime {
         crate::manifest::PluginRuntimeManifest::Process(runtime_manifest) => {
             crate::runtime::process::start_process_runtime(
                 &plugin_id,
@@ -664,9 +682,6 @@ pub async fn start_plugin_runtime(
                 &manager.status_snapshot().layout.logs_dir,
             )
             .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?
         }
         crate::manifest::PluginRuntimeManifest::Docker(runtime_manifest) => {
             crate::runtime::docker::start_docker_runtime(
@@ -682,9 +697,6 @@ pub async fn start_plugin_runtime(
                 },
             )
             .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?
         }
         crate::manifest::PluginRuntimeManifest::WasmComponent(runtime_manifest) => {
             crate::runtime::wasm::start_wasm_component_runtime(
@@ -697,9 +709,6 @@ pub async fn start_plugin_runtime(
                 &plugin_config_file,
             )
             .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?
         }
         crate::manifest::PluginRuntimeManifest::WasmModule(runtime_manifest) => {
             crate::runtime::wasm::start_wasm_module_runtime(
@@ -712,23 +721,53 @@ pub async fn start_plugin_runtime(
                 &plugin_config_file,
             )
             .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?
         }
     };
-    manager.set_runtime_handle(&plugin_id, handle.clone());
-    ensure_default_nav_item(state.db.as_ref(), &plugin_id, &manifest).await;
-    let _ =
-        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, true, INSTALL_STATUS_RUNNING).await;
-    let _ = registry::append_audit_log(
-        state.db.as_ref(),
-        &plugin_id,
-        "start",
-        format!("Started plugin {}", plugin_id),
-        ctx.user_id.as_ref().map(|v| v.to_string()),
-    )
-    .await;
+
+    // Handle runtime start result
+    let handle = match handle_result {
+        Ok(h) => {
+            // Runtime started successfully
+            manager.set_runtime_handle(&plugin_id, h.clone());
+            ensure_default_nav_item(state.db.as_ref(), &plugin_id, &manifest).await;
+
+            // Log success
+            let _ = registry::append_audit_log(
+                state.db.as_ref(),
+                &plugin_id,
+                "start",
+                format!("Started plugin {}", plugin_id),
+                ctx.user_id.as_ref().map(|v| v.to_string()),
+            )
+            .await;
+
+            h
+        }
+        Err(e) => {
+            // Runtime start failed, rollback DB state
+            let error_msg = e.clone();
+            let _ = registry::update_plugin_runtime_state(
+                state.db.as_ref(),
+                &plugin_id,
+                old_enabled,
+                &old_status,
+            )
+            .await;
+
+            // Log failure with rollback
+            let _ = registry::append_audit_log(
+                state.db.as_ref(),
+                &plugin_id,
+                "start",
+                format!("Failed to start plugin {}: {}. State rolled back to '{}'", plugin_id, error_msg, old_status),
+                ctx.user_id.as_ref().map(|v| v.to_string()),
+            )
+            .await;
+
+            return Err(AppError::internal(error_msg, ctx.request_id.to_owned(), ctx.client_ip.to_owned()));
+        }
+    };
+
     let data = serde_json::to_value(PluginRuntimeActionResponse { handle }).map_err(|e| {
         AppError::new(
             ErrorCode::SerializationFailed,
@@ -829,59 +868,100 @@ pub async fn stop_plugin_runtime(
             ctx.client_ip.to_owned(),
         )
     })?;
+
+    // Check current DB state
+    let plugin = registry::get_registry_by_id(state.db.as_ref(), &plugin_id)
+        .await
+        .map_err(|e| map_db_error(&ctx, "Failed to load plugin registry", e))?
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::NotFound,
+                format!("Plugin '{}' not found", plugin_id),
+                ctx.request_id.to_owned(),
+                ctx.client_ip.to_owned(),
+            )
+        })?;
+
+    if plugin.install_status != INSTALL_STATUS_RUNNING {
+        return Err(AppError::new(
+            ErrorCode::BadRequest,
+            format!("Plugin '{}' is not running (current status: '{}')", plugin_id, plugin.install_status),
+            ctx.request_id.to_owned(),
+            ctx.client_ip.to_owned(),
+        ));
+    }
+
+    // Atomically try to remove runtime handle - only first caller succeeds
     let handle = manager.remove_runtime_handle(&plugin_id).ok_or_else(|| {
         AppError::new(
-            ErrorCode::NotFound,
-            format!("Plugin '{}' runtime is not running", plugin_id),
+            ErrorCode::BadRequest,
+            format!("Plugin '{}' is not running or already being stopped", plugin_id),
             ctx.request_id.to_owned(),
             ctx.client_ip.to_owned(),
         )
     })?;
-    match handle.runtime_kind.as_str() {
-        "process" => crate::runtime::process::stop_process_runtime(&handle)
-            .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?,
+
+    // Try to stop the runtime
+    let stop_result = match handle.runtime_kind.as_str() {
+        "process" => crate::runtime::process::stop_process_runtime(&handle).await,
         "docker" => {
             crate::runtime::docker::stop_docker_runtime(&handle, manager.docker_engine_command())
                 .await
-                .map_err(|e| {
-                    AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-                })?
         }
-        "wasm-component" => crate::runtime::wasm::stop_wasm_runtime(&handle)
-            .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?,
-        "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle)
-            .await
-            .map_err(|e| {
-                AppError::internal(e, ctx.request_id.to_owned(), ctx.client_ip.to_owned())
-            })?,
-        _ => {}
-    }
-    let _ =
-        registry::update_plugin_runtime_state(state.db.as_ref(), &plugin_id, false, INSTALL_STATUS_INSTALLED)
+        "wasm-component" => crate::runtime::wasm::stop_wasm_runtime(&handle).await,
+        "wasm-module" => crate::runtime::wasm::stop_wasm_runtime(&handle).await,
+        _ => Ok(()),
+    };
+
+    // Handle stop result
+    match stop_result {
+        Ok(_) => {
+            // Stop succeeded, update DB
+            let _ = registry::update_plugin_runtime_state(
+                state.db.as_ref(),
+                &plugin_id,
+                false,
+                INSTALL_STATUS_INSTALLED,
+            )
             .await;
-    let _ = registry::append_audit_log(
-        state.db.as_ref(),
-        &plugin_id,
-        "stop",
-        format!("Stopped plugin {}", plugin_id),
-        ctx.user_id.as_ref().map(|v| v.to_string()),
-    )
-    .await;
-    let data = serde_json::to_value(PluginRuntimeActionResponse { handle }).map_err(|e| {
-        AppError::new(
-            ErrorCode::SerializationFailed,
-            e.to_string(),
-            ctx.request_id.to_owned(),
-            ctx.client_ip.to_owned(),
-        )
-    })?;
-    Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+
+            // Log success
+            let _ = registry::append_audit_log(
+                state.db.as_ref(),
+                &plugin_id,
+                "stop",
+                format!("Stopped plugin {}", plugin_id),
+                ctx.user_id.as_ref().map(|v| v.to_string()),
+            )
+            .await;
+
+            let data = serde_json::to_value(PluginRuntimeActionResponse { handle }).map_err(|e| {
+                AppError::new(
+                    ErrorCode::SerializationFailed,
+                    e.to_string(),
+                    ctx.request_id.to_owned(),
+                    ctx.client_ip.to_owned(),
+                )
+            })?;
+            Ok(Json(Resp::ok(ctx.request_id, ctx.client_ip, data)))
+        }
+        Err(e) => {
+            // Stop failed, restore handle to manager
+            let error_msg = e.clone();
+            manager.set_runtime_handle(&plugin_id, handle.clone());
+
+            let _ = registry::append_audit_log(
+                state.db.as_ref(),
+                &plugin_id,
+                "stop",
+                format!("Failed to stop plugin {}: {}. Handle restored, state remains 'running'", plugin_id, error_msg),
+                ctx.user_id.as_ref().map(|v| v.to_string()),
+            )
+            .await;
+
+            Err(AppError::internal(error_msg, ctx.request_id.to_owned(), ctx.client_ip.to_owned()))
+        }
+    }
 }
 
 #[utoipa::path(

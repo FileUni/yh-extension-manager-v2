@@ -1,6 +1,6 @@
 use crate::config::get_extension_manager_v2_config;
 use crate::entities::plugin_registry;
-use crate::installer::INSTALL_STATUS_PENDING;
+use crate::installer::{INSTALL_STATUS_PENDING, PLUGIN_DEFAULT_CONFIG_FILE_NAME};
 use base64::Engine;
 use dashmap::DashMap;
 use rand::RngCore;
@@ -168,6 +168,45 @@ impl PluginRuntimeManagerV2 {
         base64::engine::general_purpose::STANDARD.encode(self.host_api_secret.as_ref())
     }
 
+    /// Get the HMAC secret for user context signing
+    pub fn user_context_hmac_secret(&self) -> &[u8] {
+        self.host_api_secret.as_ref()
+    }
+
+    /// Sign user context data with HMAC-SHA256
+    pub fn sign_user_context(&self, user_id: &str, username: &str, role_id: i16) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let data = format!("{}:{}:{}", user_id, username, role_id);
+        let mut mac = HmacSha256::new_from_slice(self.host_api_secret.as_ref())
+            .expect("HMAC can take key of any size");
+        mac.update(data.as_bytes());
+        let result = mac.finalize();
+        hex::encode(result.into_bytes())
+    }
+
+    /// Verify user context signature
+    pub fn verify_user_context_signature(
+        &self,
+        user_id: &str,
+        username: &str,
+        role_id: i16,
+        signature: &str,
+    ) -> bool {
+        let expected = self.sign_user_context(user_id, username, role_id);
+        // Constant-time comparison to prevent timing attacks
+        expected.len() == signature.len()
+            && expected
+                .bytes()
+                .zip(signature.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    }
+
+
     pub async fn ensure_plugin_config_paths(
         &self,
         plugin_id: &str,
@@ -190,7 +229,7 @@ impl PluginRuntimeManagerV2 {
                 e
             )
         })?;
-        let config_file = config_dir.join("config.toml");
+        let config_file = config_dir.join(PLUGIN_DEFAULT_CONFIG_FILE_NAME);
         if !tokio::fs::try_exists(&config_file).await.map_err(|e| {
             format!(
                 "failed to check plugin config file '{}': {}",
